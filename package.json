@@ -1,0 +1,21 @@
+{
+  "name": "weq4uservices",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-dev.ps1",
+    "dev:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-dev.ps1",
+    "demo:quotes": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-quote-demo.ps1",
+    "demo:quotes:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-quote-demo.ps1",
+    "build": "npm run build --workspace apps/api && npm run build --workspace apps/storefront && npm run build --workspace apps/admin",
+    "lint": "npm run lint --workspace apps/api && npm run lint --workspace apps/storefront && npm run lint --workspace apps/admin",
+    "test": "npm run test --workspace apps/api",
+    "start": "npm run start --workspace apps/api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

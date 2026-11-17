@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://weq4uservices.co.za/sitemap.xml

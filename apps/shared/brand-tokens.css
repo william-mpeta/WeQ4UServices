@@ -1,0 +1,38 @@
+:root {
+  --forest: #0a2622;
+  --forest-soft: #153d34;
+  --mint: #b8ddc9;
+  --mint-strong: #43836d;
+  --amber: #f59e0b;
+  --amber-hover: #ffbd3e;
+  --amber-soft: #fff6df;
+  --paper: #f6f5ef;
+  --white: #fffefa;
+  --white-on-forest: #d7e6dc;
+  --ink: #203a32;
+  --muted: #69766e;
+  --line: #dfe3da;
+  --card-border: #dce2d8;
+  --card-shadow: 0 12px 28px rgba(27, 58, 44, .08);
+  --status-outline: rgba(255, 255, 255, .3);
+  --amber-focus-glow: 0 0 0 3px rgba(245, 158, 11, .16);
+  --quote-awaiting-bg: #fff2cc;
+  --quote-awaiting-ink: #704b00;
+  --quote-accepted-bg: #e2f2e9;
+  --quote-accepted-ink: #20583c;
+  --quote-declined-bg: #fbe8e5;
+  --quote-declined-ink: #852d22;
+  --quote-expired-bg: #ecefea;
+  --quote-expired-ink: #536159;
+  --quote-status-bg: var(--quote-awaiting-bg);
+  --quote-status-accent: var(--amber);
+  --radius-button: 5px;
+  --radius-card: 8px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --font-family: Inter, Arial, sans-serif;
+}
