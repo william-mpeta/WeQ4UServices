@@ -55,6 +55,31 @@ async function waitForApi(baseUrl, child, getOutput) {
   throw new Error(`API did not start. ${getOutput()}`);
 }
 
+async function stopChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill('SIGTERM');
+  let timer;
+  const exited = await Promise.race([
+    once(child, 'exit').then(() => true),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), 5000);
+    }),
+  ]);
+  clearTimeout(timer);
+  if (!exited) {
+    child.kill('SIGKILL');
+    let forceTimer;
+    const killed = await Promise.race([
+      once(child, 'exit').then(() => true),
+      new Promise((resolve) => {
+        forceTimer = setTimeout(() => resolve(false), 3000);
+      }),
+    ]);
+    clearTimeout(forceTimer);
+    if (!killed) throw new Error(`API test process ${child.pid} did not exit after SIGKILL.`);
+  }
+}
+
 test('service request lifecycle enforces consent and protects uploads and admin operations', async (t) => {
   const port = await findPort();
   const validationServer = createServer((req, res) => {
@@ -99,9 +124,7 @@ test('service request lifecycle enforces consent and protects uploads and admin 
 
   t.after(async () => {
     if (child.exitCode === null) {
-      const exited = once(child, 'exit');
-      child.kill();
-      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 3000))]);
+      await stopChild(child);
     }
     await rm(dataDirectory, { recursive: true, force: true });
     await new Promise((resolve, reject) => validationServer.close((error) => error ? reject(error) : resolve()));
@@ -1168,9 +1191,7 @@ test('local development startup seeds the published price card and profile edits
   const baseUrl = `http://127.0.0.1:${port}/api`;
   t.after(async () => {
     if (child.exitCode === null) {
-      const exited = once(child, 'exit');
-      child.kill();
-      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 3000))]);
+      await stopChild(child);
     }
     await rm(dataDirectory, { recursive: true, force: true });
   });

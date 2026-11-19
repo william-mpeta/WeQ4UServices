@@ -6,7 +6,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, 
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createQuotePdf, createRegistryReviewPdf } from './quotePdf.js';
+import { closeQuotePdfBrowser, createQuotePdf, createRegistryReviewPdf } from './quotePdf.js';
 import { quoteActionNames, quoteExpiryTimestamp, quoteStatusAction, signQuoteActionToken, verifyQuoteActionToken } from './quoteActionTokens.js';
 import { contributionRatePercent, createDefaultPricingProfiles, financeQuoteSummary, generateQuote, hasConfiguredPricingProfiles, isProvisionalLicenceEstimateEligible, pricingComponents, pricingPackages, publicServiceCatalogue, quoteConfigurationIssue, resolvePricingProfile, seedCommercialPricingProfiles, serviceCatalogue, validatePricingProfileUpdate } from './pricing.js';
 import { assessmentForServiceDefinition, normalizeRequestServiceDefinition, resolveServiceDefinition, serviceDefinitionCanQuote, serviceDefinitions, serviceQuoteIssue } from './serviceDefinitions.js';
@@ -1989,9 +1989,26 @@ app.use((error, req, res, next) => {
 });
 
 initializePrivateStorage().then(initializePricingProfiles).then(() => {
-  app.listen(port, () => {
+  const server = app.listen(port, () => {
     console.log(`WeQ4U Services API listening on http://localhost:${port}`);
   });
+  const shutdown = async (signal) => {
+    console.log(`Received ${signal}; shutting down the API.`);
+    const closed = new Promise((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+    server.closeAllConnections();
+    await closed;
+    await closeQuotePdfBrowser();
+  };
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, () => {
+      shutdown(signal).catch((error) => {
+        console.error(`Could not shut down the API cleanly: ${error.message}`);
+        process.exitCode = 1;
+      });
+    });
+  }
 }).catch((error) => {
   console.error(`Could not initialize private storage and pricing profiles: ${error.message}`);
   process.exitCode = 1;

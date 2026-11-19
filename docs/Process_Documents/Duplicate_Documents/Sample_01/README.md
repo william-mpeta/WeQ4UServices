@@ -1,0 +1,9 @@
+# Duplicate Documents / Standard / Sample_01
+
+PROVISIONAL: no approved checklist is available. These are illustrative test fixtures, not a list of requirements.
+
+Fictional customer: Naledi QA Molefe
+Synthetic ID: TEST-ID-001
+Fictional vehicle: TEST 001 GP
+
+All files are TEST DOCUMENTS - NOT FOR OFFICIAL USE.

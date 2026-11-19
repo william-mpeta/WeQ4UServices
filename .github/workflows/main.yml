@@ -13,6 +13,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -31,6 +32,7 @@ jobs:
 
       - name: Test service request workflows
         run: npm test
+        timeout-minutes: 5
 
       - name: Build all apps
         run: npm run build
