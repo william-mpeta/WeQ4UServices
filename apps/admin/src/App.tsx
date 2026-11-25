@@ -837,17 +837,6 @@ export default function App() {
       assessmentSaved = true;
       setRequests((current) => current.map((record) => record.ref === result.ref ? result : record));
       let updated = result as RequestRecord;
-      if (updated.serviceAssessmentReady && updated.status === 'Awaiting Documents' && !(updated.requestedDocuments || []).length) {
-        const reviewResponse = await fetch(`${apiBase}/admin/requests/${encodeURIComponent(updated.ref)}`, {
-          method: 'PATCH',
-          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: 'Under Review' }),
-        });
-        const reviewResult = await reviewResponse.json();
-        if (!reviewResponse.ok) throw new Error(reviewResult.error || 'Could not return the verified case to review.');
-        updated = reviewResult as RequestRecord;
-        setRequests((current) => current.map((record) => record.ref === updated.ref ? updated : record));
-      }
       if (updated.serviceAssessmentReady && updated.allowedNextStatuses.includes('Quote Preparation')) {
         const quoteResponse = await fetch(`${apiBase}/admin/requests/${encodeURIComponent(updated.ref)}`, {
           method: 'PATCH',
@@ -861,7 +850,9 @@ export default function App() {
         setDraftStatus(updated.status);
       }
       setNotice(updated.status === 'Quote Preparation'
-        ? 'Documents verified. Ready for quote — the quote workspace is open.'
+        ? updated.quoteReadiness?.ready && updated.pricingResolution?.preview.ready
+          ? 'Documents verified. Ready for quote — the quote workspace is open.'
+          : `Documents verified. The quote workspace is open, but quote preparation is blocked: ${updated.quoteReadiness?.reason || updated.pricingResolution?.reason || 'Complete the required pricing configuration.'}`
         : updated.serviceAssessmentReady
           ? 'Documents verified. This case is ready to move to quote preparation.'
           : 'Document decisions saved. Resolve any missing or rejected items before preparing a quote.');

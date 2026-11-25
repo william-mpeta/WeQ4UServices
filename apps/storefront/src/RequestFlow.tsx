@@ -471,14 +471,20 @@ export function RequestTracker({ variant = 'compact' }: { variant?: 'page' | 'co
   const [declineDetails, setDeclineDetails] = useState('');
   const [quoteChangeMessage, setQuoteChangeMessage] = useState('');
   const [quoteChangeOpen, setQuoteChangeOpen] = useState(false);
-  const [quotePreviewOpen, setQuotePreviewOpen] = useState(false);
+  const [quotePreviewUrl, setQuotePreviewUrl] = useState('');
+  const [previewingQuote, setPreviewingQuote] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  useEffect(() => {
+    if (!quotePreviewUrl) return;
+    return () => URL.revokeObjectURL(quotePreviewUrl);
+  }, [quotePreviewUrl]);
+
   async function lookup(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setLoading(true); setError(''); setNotice(''); setRecord(null); setPendingQuoteDecision(''); setDeclineReason(''); setDeclineDetails('');
+    event.preventDefault(); setLoading(true); setError(''); setNotice(''); setRecord(null); setQuotePreviewUrl(''); setPendingQuoteDecision(''); setDeclineReason(''); setDeclineDetails('');
     try {
       const savedAccess = sessionStorage.getItem('weq4u-request-access:' + reference.trim()) || '';
       setAccessKey(savedAccess);
@@ -588,19 +594,50 @@ export function RequestTracker({ variant = 'compact' }: { variant?: 'page' | 'co
         headers: { 'X-Request-Access-Key': accessKey.trim() },
       });
       if (!response.ok) {
-        const result = await response.json();
-        throw new Error(result.error || 'We could not download this quote.');
+        const result = response.headers.get('content-type')?.includes('application/json')
+          ? await response.json()
+          : null;
+        throw new Error(result?.error || 'We could not download this quote.');
       }
       const blob = await response.blob();
       const objectUrl = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = objectUrl;
       link.download = `${record.quoteBreakdown.quoteNumber}.pdf`;
+      document.body.appendChild(link);
       link.click();
-      URL.revokeObjectURL(objectUrl);
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
     } catch (downloadError) {
       setError(downloadError instanceof Error ? downloadError.message : 'We could not download this quote.');
     } finally { setSaving(false); }
+  }
+
+  async function toggleQuotePreview() {
+    if (quotePreviewUrl) {
+      setQuotePreviewUrl('');
+      return;
+    }
+    if (!record?.quoteBreakdown) return;
+    setPreviewingQuote(true);
+    setError('');
+    try {
+      const response = await fetch(`${apiBase}/requests/${encodeURIComponent(record.ref)}/quote.pdf`, {
+        headers: { 'X-Request-Access-Key': accessKey.trim() },
+      });
+      if (!response.ok) {
+        const result = response.headers.get('content-type')?.includes('application/json')
+          ? await response.json()
+          : null;
+        throw new Error(result?.error || 'We could not preview this quote.');
+      }
+      const blob = await response.blob();
+      setQuotePreviewUrl(URL.createObjectURL(blob));
+    } catch (previewError) {
+      setError(previewError instanceof Error ? previewError.message : 'We could not preview this quote.');
+    } finally {
+      setPreviewingQuote(false);
+    }
   }
 
   async function uploadDocuments(event: FormEvent<HTMLFormElement>) {
@@ -719,7 +756,7 @@ export function RequestTracker({ variant = 'compact' }: { variant?: 'page' | 'co
               <span>{record.quoteBreakdown.pricingBasis === 'case-specific-manual' ? 'Case-specific pricing' : `Pricing version v${record.quoteBreakdown.profileVersion || 1}`}</span>
             </div>
             <div className="quote-actions quote-toolbar">
-              <button type="button" className="quote-preview-button" onClick={() => setQuotePreviewOpen((open) => !open)}><Eye size={15} /> {quotePreviewOpen ? 'Hide quote' : 'Preview quote'}</button>
+              <button type="button" className="quote-preview-button" disabled={previewingQuote || saving} onClick={toggleQuotePreview}><Eye size={15} /> {previewingQuote ? 'Loading preview…' : quotePreviewUrl ? 'Hide preview' : 'Preview quote'}</button>
               <button type="button" className="quote-pdf-button" disabled={saving} onClick={downloadQuotePdf}><Download size={15} /> {saving ? 'Preparing PDF…' : 'Download PDF'}</button>
               {quoteReady && !pendingQuoteDecision && <>
                 <button type="button" className="quote-accept" disabled={saving} onClick={() => { setQuoteChangeOpen(false); setPendingQuoteDecision('accept'); }}><Check size={15} /> Accept</button>
@@ -727,6 +764,7 @@ export function RequestTracker({ variant = 'compact' }: { variant?: 'page' | 'co
                 <button type="button" className={`quote-change${quoteChangeOpen ? ' is-open' : ''}`} disabled={saving} onClick={() => { setPendingQuoteDecision(''); setQuoteChangeOpen((open) => !open); }}><span /> Request change</button>
               </>}
             </div>
+            {quotePreviewUrl && <div className="customer-quote-preview"><iframe title={`Quote preview ${record.quoteBreakdown.quoteNumber}`} src={quotePreviewUrl} /></div>}
             <div className="customer-quote-lines" id="quote-preview">{record.quoteBreakdown.lines.map((line) => <div className="quote-line" key={line.componentId}><span>{line.label}</span><strong>{formatMoney(line.amountCents, quoteCurrency)}</strong></div>)}<div className="quote-line quote-total"><strong>Total</strong><strong>{formatMoney(record.quoteBreakdown.totalCents, quoteCurrency)}</strong></div>{record.quoteBreakdown.vatTreatment && <p>VAT treatment: {record.quoteBreakdown.vatTreatment === 'inclusive' ? 'Prices include VAT' : record.quoteBreakdown.vatTreatment === 'exclusive' ? 'VAT added separately' : 'VAT not applicable'}</p>}{!!record.quoteBreakdown.conditions?.length && <div className="customer-quote-terms"><strong>Conditions</strong><ul>{record.quoteBreakdown.conditions.map((condition) => <li key={condition}>{condition}</li>)}</ul></div>}{!!record.quoteBreakdown.requiredDocuments?.length && <div className="customer-quote-terms"><strong>Documents to provide</strong><ul>{record.quoteBreakdown.requiredDocuments.map((document) => <li key={document}>{document}</li>)}</ul></div>}{record.quoteBreakdown.notes && <p><strong>What happens next:</strong> {record.quoteBreakdown.notes}</p>}</div>
             {record.quoteDecision
               ? <div className="quote-decision-recorded"><strong>Decision recorded: {record.quoteDecision}</strong>{record.quoteDecisionAt && <small>{new Date(record.quoteDecisionAt).toLocaleString('en-ZA')}{record.quoteDecisionVersion ? ` · Quote version ${record.quoteDecisionVersion}` : ''}</small>}{record.quoteDecisionReason && <small>Reason: {declineReasonLabel(record.quoteDecisionReason)}{record.quoteDecisionReasonDetails ? ` · ${record.quoteDecisionReasonDetails}` : ''}</small>}</div>

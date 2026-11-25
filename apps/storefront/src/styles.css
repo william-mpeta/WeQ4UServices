@@ -705,6 +705,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .quote-toolbar { flex-wrap: wrap; align-items: center; }
 .quote-toolbar button { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 0 14px; border-radius: 10px; font-size: 13px; }
 .quote-preview-button { border: 0; background: #14382c; color: white; cursor: pointer; }
+.quote-preview-button:disabled { cursor: progress; opacity: .7; }
+.customer-quote-preview { overflow: hidden; border: 1px solid #d7dfd4; border-radius: 10px; background: white; }
+.customer-quote-preview iframe { display: block; width: 100%; height: min(75vh, 820px); border: 0; }
 .track-workspace .quote-pdf-button { border: 1px solid #d7dfd4; background: white; color: #24382d; }
 .quote-accept { border: 0; background: #18875c; color: white; cursor: pointer; }
 .quote-decline { border: 1px solid #e7c4bf; background: white; color: #b4443a; cursor: pointer; }
@@ -732,6 +735,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .track-workspace .status-steps li { grid-template-columns: 34px 1fr; justify-items: start; align-items: center; text-align: left; }
   .track-search-row { flex-direction: column; }
   .quote-facts { grid-template-columns: 1fr 1fr; }
+  .customer-quote-preview iframe { height: 65vh; }
   .track-workspace .customer-document-list > p { flex-direction: column; align-items: start; }
 }
 @media (max-width: 720px) { .hero-copy h1 { font-size: clamp(36px, 10vw, 48px); } .section-heading h2 { font-size: clamp(28px, 8vw, 36px); } .step-indicator li { align-items: flex-start; } }

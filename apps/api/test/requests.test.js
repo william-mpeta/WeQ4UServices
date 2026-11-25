@@ -257,6 +257,49 @@ test('service request lifecycle enforces consent and protects uploads and admin 
   assert.equal(assessmentResponse.status, 200, JSON.stringify(assessed));
   assert.equal(assessed.serviceAssessmentReady, true);
   assert.equal(assessed.documents[0].reviewState, 'verified');
+  assert.equal(assessed.status, 'Under Review', 'verified customer-submitted requests should leave the new-request queue');
+  assert.ok(assessed.history.some((event) => event.status === 'Under Review' && event.customerVisible), 'the status transition should be recorded in the customer-facing audit trail');
+
+  const submittedForm = new FormData();
+  submittedForm.append('name', 'Submitted Case Review Test');
+  submittedForm.append('phone', '083 555 0103');
+  submittedForm.append('suburb', 'Johannesburg');
+  submittedForm.append('services', 'drivers-licences');
+  submittedForm.append('serviceDetails', JSON.stringify({ 'drivers-licences': 'Existing driver / renewal' }));
+  submittedForm.append('documentLabels', JSON.stringify([
+    'drivers-licences:id-copy',
+    'drivers-licences:existing-licence',
+    'drivers-licences:proof-of-residence',
+  ]));
+  submittedForm.append('consent', 'true');
+  submittedForm.append('documents', new Blob(['synthetic ID'], { type: 'application/pdf' }), 'id.pdf');
+  submittedForm.append('documents', new Blob(['synthetic licence'], { type: 'application/pdf' }), 'licence.pdf');
+  submittedForm.append('documents', new Blob(['synthetic address proof'], { type: 'application/pdf' }), 'address.pdf');
+  const submittedResponse = await fetch(`${baseUrl}/requests`, { method: 'POST', body: submittedForm });
+  const submitted = await submittedResponse.json();
+  assert.equal(submittedResponse.status, 201);
+  const submittedAdminRecord = (await (await fetch(`${baseUrl}/admin/requests`, { headers: adminHeaders })).json()).requests.find((request) => request.ref === submitted.ref);
+  assert.equal(submittedAdminRecord.status, 'Submitted');
+  const submittedDocumentsByLabel = new Map(submittedAdminRecord.documents.map((document) => [document.label, document]));
+  const submittedAssessment = await fetch(`${baseUrl}/admin/requests/${submitted.ref}/service-assessment`, {
+    method: 'PUT',
+    headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      requirementsReviewed: true,
+      eligibility: 'eligible',
+      governmentReadiness: 'ready',
+      requirements: submittedAdminRecord.serviceAssessment.requirements.map((requirement) => ({
+        ...requirement,
+        status: 'verified',
+        evidenceDocumentId: submittedDocumentsByLabel.get(requirement.label)?.id || '',
+      })),
+      documentReviews: submittedAdminRecord.documents.map((document) => ({ documentId: document.id, status: 'verified' })),
+    }),
+  });
+  const submittedAssessmentResult = await submittedAssessment.json();
+  assert.equal(submittedAssessment.status, 200, JSON.stringify(submittedAssessmentResult));
+  assert.equal(submittedAssessmentResult.serviceAssessmentReady, true);
+  assert.equal(submittedAssessmentResult.status, 'Under Review', 'a verified case still in Submitted must automatically move to review');
 
   const blockedQuoteResponse = await fetch(`${baseUrl}/admin/requests/${created.ref}`, {
     method: 'PATCH',
@@ -597,7 +640,7 @@ test('service request lifecycle enforces consent and protects uploads and admin 
     body: JSON.stringify({ decision: 'decline', quoteId: updatedTracking.quoteBreakdown.id, quoteVersion: updatedTracking.quoteBreakdown.version, declineReason: 'too-expensive' }),
   });
   assert.equal(duplicateDecisionResponse.status, 409, 'a quote decision can be recorded only once');
-  const acceptedRequest = (await (await fetch(`${baseUrl}/admin/requests`, { headers: adminHeaders })).json()).requests[0];
+  const acceptedRequest = (await (await fetch(`${baseUrl}/admin/requests`, { headers: adminHeaders })).json()).requests.find((request) => request.ref === created.ref);
   assert.equal(acceptedRequest.status, 'Quote Accepted');
   assert.equal(acceptedRequest.department, 'Finance');
   assert.equal(acceptedRequest.queue, 'Payment Setup Required');
@@ -1131,7 +1174,7 @@ test('service request lifecycle enforces consent and protects uploads and admin 
   const encryptedStore = await readFile(path.join(dataDirectory, 'requests.enc'));
   assert.equal(encryptedStore.includes(Buffer.from('Integration Test')), false, 'request records must be encrypted at rest');
   const encryptedFiles = await readdir(path.join(dataDirectory, 'documents'));
-  assert.equal(encryptedFiles.length, 6);
+  assert.equal(encryptedFiles.length, 9);
   const encryptedDocument = await readFile(path.join(dataDirectory, 'documents', encryptedFiles[0]));
   assert.equal(encryptedDocument.includes(Buffer.from('temporary test attachment')), false, 'uploaded documents must be encrypted at rest');
 
@@ -1288,6 +1331,12 @@ test('local quote-demo requests are seeded once and persist across API restarts'
       assert.equal(tracking.status, 'Your quote is ready');
       assert.equal(tracking.quoteBreakdown.quoteNumber, fixture.quoteNumber);
       assert.equal(tracking.quoteBreakdown.totalCents, 50000);
+      if (fixture.ref === 'WQ-2026-079D20628548E52904F2') {
+        const pdfResponse = await fetch(`${baseUrl}/requests/${fixture.ref}/quote.pdf`);
+        assert.equal(pdfResponse.status, 200, 'a previously published quote remains downloadable when its service registry entry is no longer customer-quotable');
+        assert.match(pdfResponse.headers.get('content-type'), /application\/pdf/);
+        assert.match(Buffer.from(await pdfResponse.arrayBuffer()).toString('latin1').slice(0, 8), /^%PDF-1\./);
+      }
     }
     assert.equal(requests.filter((record) => demoQuoteFixtures.some((fixture) => fixture.ref === record.ref)).length, 3);
   };

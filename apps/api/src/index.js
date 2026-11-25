@@ -1015,20 +1015,18 @@ app.get('/api/requests/:ref/quote.pdf', async (req, res, next) => {
       if (!record) return { missing: true };
       if (!hasCustomerAccess(record, req.get('x-request-access-key'))) return { forbidden: true };
       if (!record.quote || !record.quotePublishedAt) return { unavailable: true };
-      const eligibilityIssue = quoteSnapshotIssue(record);
-      return eligibilityIssue
-        ? { unavailable: true, reason: eligibilityIssue }
-        : { record: structuredClone(record) };
+      return { record: structuredClone(record) };
     });
     if (result.missing) return res.status(404).json({ error: 'No request was found for that reference.' });
     if (result.forbidden) return res.status(403).json({ error: 'Use the private request link provided when you submitted the request.' });
     if (result.unavailable) return res.status(409).json({ error: result.reason || 'A customer-ready quote is not available for this request.' });
     const record = result.record;
     const quoteNumber = record.quote.quoteNumber || record.quote.id;
+    const actions = quoteSnapshotIssue(record) ? undefined : quoteActionLinks(record);
     const buffer = await createQuotePdf({
       record,
       quote: record.quote,
-      actions: quoteActionLinks(record),
+      actions,
       status: quotePdfStatus(record),
       publicBaseUrl: publicBaseUrl(),
     });
@@ -1466,6 +1464,17 @@ app.put('/api/admin/requests/:ref/service-assessment', requireAdmin, requirePerm
         message: `Service assessment updated by ${req.staff.name}; readiness ${serviceAssessmentReady(record) ? 'confirmed' : 'not yet met'}.`,
         customerVisible: false,
       });
+      if (serviceAssessmentReady(record) && ['Submitted', 'Awaiting Documents'].includes(record.status)) {
+        routeToStatus(record, 'Under Review', at);
+        record.workflowVersion = 2;
+        record.customerUpdate = customerStatusUpdate(record.status);
+        record.history.push({
+          status: record.status,
+          at,
+          message: record.customerUpdate,
+          customerVisible: true,
+        });
+      }
       await saveRequestStore(store);
       return { record, pricingProfiles: store.pricingProfiles };
     });
