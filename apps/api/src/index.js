@@ -391,11 +391,36 @@ function quotePdfStatus(record) {
   return 'Awaiting decision';
 }
 
+function pricingProfileForRequest(record, pricingProfiles) {
+  const serviceId = record.services?.[0];
+  const profile = pricingProfiles[serviceId];
+  const deliveryFeeOverride = record.casePricingOverrides?.deliveryFee;
+  if (!profile || !deliveryFeeOverride) return profile;
+  return {
+    ...profile,
+    components: {
+      ...profile.components,
+      deliveryFee: {
+        ...profile.components?.deliveryFee,
+        amountCents: deliveryFeeOverride.amountCents,
+        costCents: null,
+      },
+    },
+  };
+}
+
 function quotePublicationIssue(record, pricingProfiles) {
-  const profile = pricingProfiles[record.services?.[0]];
+  const profile = pricingProfileForRequest(record, pricingProfiles);
   const readiness = serviceQuoteIssue(record, profile);
   if (!readiness.allowed) return readiness.reason;
   if (record.quote?.pricingBasis === 'case-specific-manual') return 'Case-specific quotes are not available for customer publication.';
+  const currentDeliveryFee = record.casePricingOverrides?.deliveryFee;
+  const quotedDeliveryFee = record.quote?.casePricingOverrides?.deliveryFee;
+  if (currentDeliveryFee
+    ? quotedDeliveryFee?.amountCents !== currentDeliveryFee.amountCents || quotedDeliveryFee?.setAt !== currentDeliveryFee.setAt
+    : Boolean(quotedDeliveryFee)) {
+    return 'The case-specific delivery fee changed after this quote draft was prepared. Prepare a new quote draft.';
+  }
   if (record.quote?.profileId !== profile.profileId || record.quote?.profileVersion !== profile.version) {
     return 'This quote is not based on the current approved pricing profile.';
   }
@@ -507,10 +532,14 @@ function publicRequest(record, authorized = false) {
 
 function adminRequest(record, pricingProfiles = {}) {
   const safeRecord = { ...record };
-  const activeProfile = pricingProfiles[record.services?.[0]];
+  const serviceId = record.services?.[0];
+  const activeProfile = pricingProfileForRequest(record, pricingProfiles);
+  const requestPricingProfiles = activeProfile
+    ? { ...pricingProfiles, [serviceId]: activeProfile }
+    : pricingProfiles;
   const quoteIssue = quoteConfigurationIssue(record, activeProfile);
   const registryReadiness = serviceQuoteIssue(record, activeProfile);
-  const pricingResolution = resolvePricingProfile(record, pricingProfiles);
+  const pricingResolution = resolvePricingProfile(record, requestPricingProfiles);
   delete safeRecord.accessTokenHash;
   delete safeRecord.quoteHistory;
   if (safeRecord.quote) {
@@ -1684,6 +1713,66 @@ app.get('/api/admin/finance/summary', requireAdmin, requirePermission('finance:r
   }
 });
 
+app.put('/api/admin/requests/:ref/delivery-fee-override', requireAdmin, requirePermission('requests:update'), async (req, res, next) => {
+  try {
+    const amountCents = req.body?.amountCents;
+    if (!req.body || Object.keys(req.body).some((key) => key !== 'amountCents')
+      || !Number.isSafeInteger(amountCents) || amountCents <= 0 || amountCents > 100_000_000) {
+      return res.status(400).json({ error: 'Enter a positive delivery fee as whole cents, up to R1,000,000.' });
+    }
+    const result = await withStoreLock(async () => {
+      const store = await readRequestStore();
+      const record = store.requests.find((request) => request.ref === req.params.ref);
+      if (!record) return { missing: true };
+      if (record.status !== 'Quote Preparation') return { invalid: 'Set a case-specific delivery fee only while the request is in Quote Preparation.' };
+      if (!record.courierDelivery) return { invalid: 'This request does not include courier delivery.' };
+      if (!serviceAssessmentReady(record) || (record.requestedDocuments || []).length) {
+        return { invalid: 'Verify all required documents and resolve outstanding document requests before setting a case-specific fee.' };
+      }
+      if (record.quote || record.quotePublishedAt || record.quoteDraft?.lines) {
+        return { invalid: 'A case-specific delivery fee must be set before preparing or publishing a quote draft.' };
+      }
+      const baseProfile = store.pricingProfiles[record.services?.[0]];
+      if (Number.isSafeInteger(baseProfile?.components?.deliveryFee?.amountCents)) {
+        return { invalid: 'The shared pricing profile already has a delivery fee; case-specific fees are only available when that price is not configured.' };
+      }
+      const at = new Date().toISOString();
+      const deliveryFee = { amountCents, setAt: at, setBy: req.staff.name };
+      const candidate = {
+        ...record,
+        casePricingOverrides: {
+          ...record.casePricingOverrides,
+          deliveryFee,
+        },
+      };
+      const effectiveProfile = pricingProfileForRequest(candidate, store.pricingProfiles);
+      const registryReadiness = serviceQuoteIssue(candidate, effectiveProfile);
+      if (!registryReadiness.allowed) return { invalid: registryReadiness.reason };
+      if (!serviceDefinitionCanQuote(candidate)) return { invalid: 'This service variant is not approved for customer quoting.' };
+      const pricingIssue = quoteConfigurationIssue(candidate, effectiveProfile);
+      if (pricingIssue) return { invalid: pricingIssue };
+      record.casePricingOverrides = candidate.casePricingOverrides;
+      record.casePricingOverrideHistory ||= [];
+      record.casePricingOverrideHistory.push(deliveryFee);
+      record.updatedAt = at;
+      record.history ||= [];
+      record.history.push({
+        status: record.status,
+        at,
+        message: `Case-only delivery fee R${(amountCents / 100).toFixed(2)} set by ${req.staff.name}. The shared pricing profile was not changed.`,
+        customerVisible: false,
+      });
+      await saveRequestStore(store);
+      return { record, pricingProfiles: store.pricingProfiles };
+    });
+    if (result.missing) return res.status(404).json({ error: 'No request was found for that reference.' });
+    if (result.invalid) return res.status(409).json({ error: result.invalid });
+    return res.json(adminRequest(result.record, result.pricingProfiles));
+  } catch (error) {
+    return next(error);
+  }
+});
+
 app.post('/api/admin/requests/:ref/quote-draft', requireAdmin, requirePermission('requests:update'), async (req, res, next) => {
   try {
     const quoteNotes = cleanText(req.body.quoteNotes, 500);
@@ -1711,7 +1800,8 @@ app.post('/api/admin/requests/:ref/quote-draft', requireAdmin, requirePermission
         serviceDetails: record.serviceDetails,
         serviceVariantKey: record.serviceVariantKey,
       });
-      const activeProfile = store.pricingProfiles[record.services[0]];
+      const baseProfile = store.pricingProfiles[record.services[0]];
+      const activeProfile = pricingProfileForRequest(record, store.pricingProfiles);
       const quoteReadiness = serviceQuoteIssue(record, activeProfile);
       if (!quoteReadiness.allowed) return { invalid: quoteReadiness.reason };
       const at = new Date().toISOString();
@@ -1733,6 +1823,10 @@ app.post('/api/admin/requests/:ref/quote-draft', requireAdmin, requirePermission
       generated.quote.variantKey = quoteReadiness.variant.key;
       generated.quote.serviceDefinitionVersion = record.serviceDefinitionVersion || requestDefinition?.version || null;
       generated.quote.version = (record.quoteHistory?.length || 0) + (record.quote ? 2 : 1);
+      if (record.casePricingOverrides?.deliveryFee) {
+        generated.quote.casePricingOverrides = structuredClone(record.casePricingOverrides);
+        generated.quote.pricingBasis = 'approved-profile-with-case-specific-delivery-fee';
+      }
       record.serviceValidated = true;
       if (record.quoteDraft) {
         record.quoteDraftHistory ||= [];
@@ -1753,7 +1847,7 @@ app.post('/api/admin/requests/:ref/quote-draft', requireAdmin, requirePermission
         customerVisible: false,
       });
       await saveRequestStore(store);
-      return { record, profile: activeProfile };
+      return { record, profile: baseProfile };
     });
     if (updated.missing) return res.status(404).json({ error: 'No request was found for that reference.' });
     if (updated.invalid) return res.status(409).json({ error: updated.invalid });

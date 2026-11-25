@@ -67,6 +67,7 @@ type RequestRecord = {
   customerTasks?: CustomerTask[];
   quoteAmount: number | null;
   quoteCurrency?: string;
+  casePricingOverrides?: { deliveryFee?: { amountCents: number; setAt: string; setBy: string } };
   quoteDraft?: { id?: string; quoteNumber?: string; version?: number; approvalStatus?: 'editing' | 'pending-approval' | 'approved'; approvedBy?: string; approvedAt?: string; preparedBy?: string; preparedAt?: string; packageName?: string; serviceCode?: string; serviceDefinitionVersion?: number | null; pricingBasisLabel?: string; estimateDisclaimer?: string; contributionRatePercent?: number | null; contributionCents?: number | null; notes?: string; conditions?: string[]; requiredDocuments?: string[]; validUntil?: string; totalCents?: number; vatTreatment?: VatTreatment; lines?: { componentId: string; label: string; amountCents: number; sourceNote?: string }[] };
   quote?: { id: string; quoteNumber?: string; version?: number; profileId: string; profileVersion: number; profileName?: string; packageName?: string; serviceCode?: string; serviceDefinitionVersion?: number | null; pricingBasis?: string; pricingBasisLabel?: string; estimateDisclaimer?: string; contributionRatePercent?: number | null; contributionCents?: number | null; vatTreatment?: VatTreatment; effectiveFrom?: string; totalCents: number; generatedAt?: string; validUntil?: string; notes?: string; conditions?: string[]; requiredDocuments?: string[]; lines: { componentId: string; label: string; amountCents: number; sourceNote?: string }[] };
   quoteRevisionRequests?: { quoteVersion: number; message: string; requestedAt: string }[];
@@ -587,6 +588,7 @@ export default function App() {
   const [draftQuoteNotes, setDraftQuoteNotes] = useState('');
   const [draftQuoteConditions, setDraftQuoteConditions] = useState('');
   const [draftQuoteValidUntil, setDraftQuoteValidUntil] = useState('');
+  const [draftDeliveryFeeZar, setDraftDeliveryFeeZar] = useState('');
   const [draftQuoteCommunicationConfirmed, setDraftQuoteCommunicationConfirmed] = useState(false);
   const [draftQuoteCommunicationChannel, setDraftQuoteCommunicationChannel] = useState('portal');
   const [draftFulfilmentValidated, setDraftFulfilmentValidated] = useState(false);
@@ -704,6 +706,7 @@ export default function App() {
     setDraftQuoteNotes(request.quoteDraft?.notes || request.quote?.notes || '');
     setDraftQuoteConditions((request.quoteDraft?.conditions || request.quote?.conditions || []).join('\n'));
     setDraftQuoteValidUntil(request.quoteDraft?.validUntil || request.quote?.validUntil || quoteDefaultValidUntil());
+    setDraftDeliveryFeeZar(request.casePricingOverrides?.deliveryFee ? priceText(request.casePricingOverrides.deliveryFee.amountCents) : '');
     setDraftQuoteCommunicationConfirmed(false);
     setDraftQuoteCommunicationChannel('portal');
     setDraftFulfilmentValidated(request.fulfilmentValidated || false);
@@ -950,6 +953,33 @@ export default function App() {
     }
   }
 
+  async function saveCaseDeliveryFee() {
+    if (!selected) return;
+    const amountCents = parseCents(draftDeliveryFeeZar);
+    if (amountCents === null || !Number.isSafeInteger(amountCents) || amountCents <= 0) {
+      setError('Enter a delivery fee greater than R0.00.');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    setNotice('');
+    try {
+      const response = await fetch(`${apiBase}/admin/requests/${encodeURIComponent(selected.ref)}/delivery-fee-override`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amountCents }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not save this case-only delivery fee.');
+      setRequests((current) => current.map((record) => record.ref === result.ref ? result : record));
+      setNotice('One-off delivery fee saved to this case only. The shared pricing profile is unchanged; no quote has been prepared or sent.');
+    } catch (feeError) {
+      setError(feeError instanceof Error ? feeError.message : 'Could not save this case-only delivery fee.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function downloadRegistryReview() {
     if (!selected) return;
     setSaving(true);
@@ -1164,6 +1194,21 @@ export default function App() {
                 {selected.services.length > 1 && <p className="admin-hint">Only the primary requested service is included in this quote preview.</p>}
               </>}
               {!selected.pricingResolution && <p className="admin-hint">A quote preview will appear when this service has an approved pricing profile.</p>}
+              {selected.casePricingOverrides?.deliveryFee && <p className="admin-hint" role="status">
+                Case-only delivery fee: {moneyExact(selected.casePricingOverrides.deliveryFee.amountCents / 100)} · set by {selected.casePricingOverrides.deliveryFee.setBy}. The shared pricing profile is unchanged.
+              </p>}
+              {selected.status === 'Quote Preparation'
+                && selected.serviceAssessmentReady
+                && selected.courierDelivery
+                && selected.pricingResolution?.preview.missing.length === 1
+                && selected.pricingResolution.preview.missing[0].id === 'deliveryFee'
+                && !selected.quote
+                && !selected.quoteDraft?.lines
+                && <div className="case-delivery-fee-override">
+                  <p className="admin-hint">Delivery is selected but has no shared price. This one-off fee applies only to this case.</p>
+                  <label>One-off delivery fee (ZAR)<input type="number" min="0.01" step="0.01" value={draftDeliveryFeeZar} onChange={(event) => setDraftDeliveryFeeZar(event.target.value)} /></label>
+                  <button className="admin-secondary-button" type="button" disabled={saving || !draftDeliveryFeeZar} onClick={saveCaseDeliveryFee}>Save case-only delivery fee</button>
+                </div>}
               <label>Quote notes for the customer<textarea rows={2} value={draftQuoteNotes} onChange={(event) => setDraftQuoteNotes(event.target.value)} placeholder="Explain what is included and any important conditions." /></label>
               <label>Conditions <span className="field-note">Optional; one per line, up to 4.</span><textarea rows={2} maxLength={500} value={draftQuoteConditions} onChange={(event) => setDraftQuoteConditions(event.target.value)} placeholder="For example: Price is based on the confirmed service scope." /></label>
               <label>Quote valid until<input type="date" min={tomorrowKey()} max={quoteMaximumValidUntil()} value={draftQuoteValidUntil} onChange={(event) => setDraftQuoteValidUntil(event.target.value)} /></label>

@@ -157,6 +157,7 @@ test('service request lifecycle enforces consent and protects uploads and admin 
   requestForm.append('pricingPackage', 'priority');
   requestForm.append('serviceDetails', JSON.stringify({ 'drivers-licences': 'Existing driver / renewal' }));
   requestForm.append('courier', 'true');
+  requestForm.append('courierDelivery', 'true');
   requestForm.append('consent', 'true');
   requestForm.append('message', 'Temporary integration test content');
   requestForm.append('documents', new Blob(['temporary test attachment'], { type: 'application/pdf' }), 'test.pdf');
@@ -367,6 +368,32 @@ test('service request lifecycle enforces consent and protects uploads and admin 
   });
   assert.equal(activateProfileResponse.status, 200);
 
+  const invalidDeliveryFeeOverride = await fetch(`${baseUrl}/admin/requests/${created.ref}/delivery-fee-override`, {
+    method: 'PUT',
+    headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amountCents: 0 }),
+  });
+  assert.equal(invalidDeliveryFeeOverride.status, 400, 'case-specific delivery fees must be positive valid cents');
+  const unauthorizedDeliveryFeeOverride = await fetch(`${baseUrl}/admin/requests/${created.ref}/delivery-fee-override`, {
+    method: 'PUT',
+    headers: { ...financeHeaders, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amountCents: 10000 }),
+  });
+  assert.equal(unauthorizedDeliveryFeeOverride.status, 403, 'finance read access alone cannot change a customer case');
+  const deliveryFeeOverrideResponse = await fetch(`${baseUrl}/admin/requests/${created.ref}/delivery-fee-override`, {
+    method: 'PUT',
+    headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amountCents: 10000 }),
+  });
+  const deliveryFeeOverride = await deliveryFeeOverrideResponse.json();
+  assert.equal(deliveryFeeOverrideResponse.status, 200, JSON.stringify(deliveryFeeOverride));
+  assert.equal(deliveryFeeOverride.casePricingOverrides.deliveryFee.amountCents, 10000);
+  assert.equal(deliveryFeeOverride.quoteReadiness.ready, true);
+  assert.equal(deliveryFeeOverride.pricingResolution.preview.totalCents, 28100);
+  assert.ok(deliveryFeeOverride.history.some((event) => event.message.includes('Case-only delivery fee R100.00')));
+  const profileAfterCaseOverride = (await (await fetch(`${baseUrl}/admin/pricing-profiles`, { headers: adminHeaders })).json()).profiles.find((profile) => profile.serviceId === 'drivers-licences');
+  assert.equal(profileAfterCaseOverride.components.deliveryFee.amountCents, null, 'a one-case fee must not change the shared pricing profile');
+
   const simulatorResponse = await fetch(`${baseUrl}/admin/pricing-preview`, {
     method: 'POST',
     headers: { ...adminHeaders, 'Content-Type': 'application/json' },
@@ -448,7 +475,8 @@ test('service request lifecycle enforces consent and protects uploads and admin 
   assert.equal(quoteDraft.quoteDraft.packageName, 'Priority');
   assert.deepEqual(quoteDraft.quoteDraft.conditions, ['Price is based on the confirmed service scope.']);
   assert.deepEqual(quoteDraft.quoteDraft.requiredDocuments, ['Copy of ID', 'Current licence', 'Proof of residence']);
-  assert.equal(quoteDraft.quoteDraft.totalCents, 18100);
+  assert.equal(quoteDraft.quoteDraft.totalCents, 28100);
+  assert.equal(quoteDraft.quoteDraft.casePricingOverrides.deliveryFee.amountCents, 10000);
   const financeDraftQueue = await (await fetch(`${baseUrl}/admin/requests`, { headers: financeHeaders })).json();
   assert.ok(!financeDraftQueue.requests.some((request) => request.ref === created.ref), 'Finance does not gain access to customer data while a quote is only a draft');
   const prematurePublish = await fetch(`${baseUrl}/admin/requests/${created.ref}/quote-draft/publish`, {
@@ -480,9 +508,10 @@ test('service request lifecycle enforces consent and protects uploads and admin 
   assert.equal(publishResponse.status, 200, JSON.stringify(quoted));
   assert.equal(quoted.status, 'Awaiting Customer Decision');
   assert.equal(quoted.quoteCommunication.channel, 'portal');
-  assert.equal(quoted.quoteAmount, 181);
-  assert.equal(quoted.quote.totalCents, 18100);
-  assert.equal(quoted.quote.contributionCents, 5430);
+  assert.equal(quoted.quoteAmount, 281);
+  assert.equal(quoted.quote.totalCents, 28100);
+  assert.equal(quoted.quote.pricingBasis, 'approved-profile-with-case-specific-delivery-fee');
+  assert.equal(quoted.quote.contributionCents, 8430);
   assert.equal(quoted.quote.vatTreatment, 'not-applicable');
   assert.equal(quoted.quote.effectiveFrom, '2026-11-09');
   assert.equal(quoted.quote.profileName, "Driver's Licence Renewal");
@@ -583,11 +612,11 @@ test('service request lifecycle enforces consent and protects uploads and admin 
   const updatedTrackingResponse = await fetch(`${baseUrl}/requests/${created.ref}`);
   const updatedTracking = await updatedTrackingResponse.json();
   assert.equal(updatedTracking.status, 'Your quote is ready');
-  assert.equal(updatedTracking.quoteAmount, 181);
+  assert.equal(updatedTracking.quoteAmount, 281);
   assert.match(updatedTracking.quoteBreakdown.quoteNumber, /^Q\d{4}-0002$/);
   assert.equal(updatedTracking.quoteBreakdown.version, 2);
   assert.ok(updatedTracking.quoteBreakdown.generatedAt);
-  assert.equal(updatedTracking.quoteBreakdown.totalCents, 18100);
+  assert.equal(updatedTracking.quoteBreakdown.totalCents, 28100);
   assert.equal(updatedTracking.quoteBreakdown.serviceName, "Driver's Licence Renewal");
   assert.equal(updatedTracking.quoteBreakdown.vatTreatment, 'not-applicable');
   assert.equal(Object.hasOwn(updatedTracking.quoteBreakdown, 'effectiveFrom'), false, 'internal pricing effective dates are not exposed in the customer portal');
@@ -662,15 +691,15 @@ test('service request lifecycle enforces consent and protects uploads and admin 
   const financeSummaryResponse = await fetch(`${baseUrl}/admin/finance/summary`, { headers: financeHeaders });
   const financeSummary = await financeSummaryResponse.json();
   const driverSummary = financeSummary.services.find((service) => service.serviceId === 'drivers-licences');
-  assert.equal(driverSummary.quotedCents, 18100);
-  assert.equal(driverSummary.estimatedCostCents, 1100);
-  assert.equal(driverSummary.estimatedGrossMarginCents, 17000);
+  assert.equal(driverSummary.quotedCents, 28100);
+  assert.equal(driverSummary.estimatedCostCents, null, 'the case-only delivery fee has no approved cost amount');
+  assert.equal(driverSummary.estimatedGrossMarginCents, null, 'margin is not reported until the case-only delivery cost is known');
 
   const checkoutResponse = await fetch(`${baseUrl}/requests/${created.ref}/payfast-checkout`, { method: 'POST' });
   const checkout = await checkoutResponse.json();
   assert.equal(checkoutResponse.status, 200, JSON.stringify(checkout));
   assert.equal(checkout.action, 'https://sandbox.payfast.co.za/eng/process');
-  assert.equal(checkout.fields.amount, '181.00');
+  assert.equal(checkout.fields.amount, '281.00');
   assert.equal(checkout.fields.m_payment_id, created.ref);
   const wrongAmountNotification = {
     merchant_id: '10000100',
@@ -687,7 +716,7 @@ test('service request lifecycle enforces consent and protects uploads and admin 
   });
   assert.equal(wrongAmountResponse.status, 400, 'a mismatched payment amount must not release fulfilment');
 
-  const paymentNotification = { ...wrongAmountNotification, pf_payment_id: 'test-payment-verified', amount_gross: '181.00' };
+  const paymentNotification = { ...wrongAmountNotification, pf_payment_id: 'test-payment-verified', amount_gross: '281.00' };
   paymentNotification.signature = payFastSignature(paymentNotification, 'test-passphrase');
   const paymentResponse = await fetch(`${baseUrl}/payments/payfast/itn`, {
     method: 'POST',
