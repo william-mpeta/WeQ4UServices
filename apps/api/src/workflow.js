@@ -124,12 +124,10 @@ export function quoteLifecycleForStatus(status) {
 
 export function serviceAssessmentReady(record) {
   const assessment = record.serviceAssessment;
-  return assessment?.requirementsReviewed === true
-    && assessment.eligibility === 'eligible'
-    && assessment.governmentReadiness === 'ready'
-    && (assessment.requirements || []).length > 0
-    && assessment.requirements.every((requirement) => ['verified', 'not-applicable'].includes(requirement.status)
-      && (requirement.status !== 'not-applicable' || Boolean(requirement.note))
+  const requirements = assessment?.requirements || [];
+  return requirements.length > 0
+    && requirements.every((requirement) => ['verified', 'not-applicable'].includes(requirement.status)
+      && (requirement.status !== 'not-applicable' || (requirement.required === false && Boolean(requirement.note)))
       && (requirement.status !== 'verified'
         || Boolean(requirement.note)
         || (requirement.evidenceDocumentId && (record.documents || []).some((document) => document.id === requirement.evidenceDocumentId && document.reviewState === 'verified'))))

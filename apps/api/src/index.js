@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { closeQuotePdfBrowser, createQuotePdf, createRegistryReviewPdf } from './quotePdf.js';
 import { quoteActionNames, quoteExpiryTimestamp, quoteStatusAction, signQuoteActionToken, verifyQuoteActionToken } from './quoteActionTokens.js';
+import { seedDemoQuoteRequests } from './demoQuoteFixtures.js';
 import { contributionRatePercent, createDefaultPricingProfiles, financeQuoteSummary, generateQuote, hasConfiguredPricingProfiles, isProvisionalLicenceEstimateEligible, pricingComponents, pricingPackages, publicServiceCatalogue, quoteConfigurationIssue, resolvePricingProfile, seedCommercialPricingProfiles, serviceCatalogue, validatePricingProfileUpdate } from './pricing.js';
 import { assessmentForServiceDefinition, normalizeRequestServiceDefinition, resolveServiceDefinition, serviceDefinitionCanQuote, serviceDefinitions, serviceQuoteIssue } from './serviceDefinitions.js';
 import { resolveRegistryConfiguration } from './services/registry.js';
@@ -193,6 +194,18 @@ async function initializePricingProfiles() {
     : createDefaultPricingProfiles(existingProfiles);
   store.pricingSeedVersion = shouldSeed ? 'commercial-pricing-model-v2' : 'skipped-existing-pricing';
   await saveRequestStore(store);
+}
+
+async function initializeDemoQuoteRequests() {
+  if (process.env.QUOTE_DEMO_SEED_ENABLED !== 'true'
+    || !['development', 'test'].includes(process.env.NODE_ENV)) return;
+  await withStoreLock(async () => {
+    const store = await readRequestStore();
+    const added = seedDemoQuoteRequests(store);
+    if (!added) return;
+    await saveRequestStore(store);
+    console.log(`Added ${added} missing local quote-demo request(s).`);
+  });
 }
 
 function withStoreLock(operation) {
@@ -1680,7 +1693,7 @@ app.post('/api/admin/requests/:ref/quote-draft', requireAdmin, requirePermission
       const record = store.requests.find((request) => request.ref === req.params.ref);
       if (!record) return { missing: true };
       if (record.status !== 'Quote Preparation') return { invalid: 'Move the request to Quote Preparation before preparing a quote.' };
-      if (!serviceAssessmentReady(record)) return { invalid: 'Complete the requirements, document verification, eligibility, and government-readiness assessment before preparing a quote.' };
+      if (!serviceAssessmentReady(record)) return { invalid: 'Approve all required documents and resolve outstanding document requests before preparing a quote.' };
       if ((record.requestedDocuments || []).length) return { invalid: 'Resolve all outstanding document requests before preparing a quote.' };
       if (!validateQuoteValidityDate(quoteValidUntil)) return { invalid: 'Choose a valid-until date from 1 to 90 days after issue.' };
       const requestDefinition = resolveServiceDefinition({
@@ -1988,7 +2001,7 @@ app.use((error, req, res, next) => {
   return res.status(500).json({ error: 'Something went wrong. Please contact WeQ4UServices directly.' });
 });
 
-initializePrivateStorage().then(initializePricingProfiles).then(() => {
+initializePrivateStorage().then(initializePricingProfiles).then(initializeDemoQuoteRequests).then(() => {
   const server = app.listen(port, () => {
     console.log(`WeQ4U Services API listening on http://localhost:${port}`);
   });

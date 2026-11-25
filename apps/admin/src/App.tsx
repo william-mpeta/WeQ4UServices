@@ -143,6 +143,7 @@ const serviceNames: Record<string, string> = {
   'traffic-register': 'Traffic Register',
 };
 const terminalStatuses = new Set(['Completed', 'Quote Declined', 'Cancelled']);
+const normalizedDocumentLabel = (label: string) => label.trim().toLowerCase().replace(/\s+/g, ' ');
 const queueGroups: Record<string, string[]> = {
   'Waiting on Customer': [],
   'New Requests': ['Submitted'],
@@ -582,11 +583,6 @@ export default function App() {
   const [draftRequestedDocuments, setDraftRequestedDocuments] = useState('');
   const [draftServiceValidated, setDraftServiceValidated] = useState(false);
   const [assessmentRequirements, setAssessmentRequirements] = useState<ServiceRequirement[]>([]);
-  const [assessmentEligibility, setAssessmentEligibility] = useState<ServiceAssessment['eligibility']>('pending');
-  const [assessmentGovernmentReadiness, setAssessmentGovernmentReadiness] = useState<ServiceAssessment['governmentReadiness']>('pending');
-  const [assessmentNotes, setAssessmentNotes] = useState('');
-  const [assessmentRequirementsReviewed, setAssessmentRequirementsReviewed] = useState(false);
-  const [newRequirement, setNewRequirement] = useState('');
   const [documentReviewStates, setDocumentReviewStates] = useState<Record<string, { status: 'pending' | 'verified' | 'rejected' | 'replacement-required'; note: string }>>({});
   const [draftQuoteNotes, setDraftQuoteNotes] = useState('');
   const [draftQuoteConditions, setDraftQuoteConditions] = useState('');
@@ -673,11 +669,23 @@ export default function App() {
     return matchesQuery && matchesOwnership && matchesPartnerReferral && matchesQueue;
   }), [requests, search, statusFilter]);
   const selected = requests.find((record) => record.ref === selectedRef);
-  const needsCaseSpecificAssessment = Boolean(selected && (!selected.serviceDefinitionReady || !selected.serviceDefinition));
+  const quoteReadyForPreparation = Boolean(selected && selected.serviceAssessmentReady
+    && selected.serviceDefinitionReady !== false
+    && selected.quoteReadiness?.ready
+    && selected.pricingResolution?.preview.ready);
   const quotePreparationReady = Boolean(selected && selected.serviceAssessmentReady
+    && selected.serviceDefinitionReady !== false
     && selected.quoteReadiness?.ready
     && selected.pricingResolution?.preview.ready
     && Boolean(draftQuoteValidUntil));
+  const checklistRequirements = selected?.serviceAssessment?.requirements || [];
+  const checklistRows = checklistRequirements.map((requirement) => {
+    const document = selected?.documents.find((item) => item.id === requirement.evidenceDocumentId
+      || normalizedDocumentLabel(item.label || '') === normalizedDocumentLabel(requirement.label));
+    return { requirement, document };
+  });
+  const checklistDocumentIds = new Set(checklistRows.flatMap(({ document }) => document ? [document.id] : []));
+  const additionalDocuments = selected?.documents.filter((document) => !checklistDocumentIds.has(document.id)) || [];
 
   useEffect(() => {
     const request = requests.find((record) => record.ref === selectedRef);
@@ -689,11 +697,6 @@ export default function App() {
     setDraftRequestedDocuments((request.requestedDocuments || []).join('\n'));
     setDraftServiceValidated(request.serviceValidated || false);
     setAssessmentRequirements(request.serviceAssessment?.requirements || []);
-    setAssessmentEligibility(request.serviceAssessment?.eligibility || 'pending');
-    setAssessmentGovernmentReadiness(request.serviceAssessment?.governmentReadiness || 'pending');
-    setAssessmentNotes(request.serviceAssessment?.notes || '');
-    setAssessmentRequirementsReviewed(request.serviceAssessment?.requirementsReviewed || false);
-    setNewRequirement('');
     setDocumentReviewStates(Object.fromEntries(request.documents.map((document) => [document.id, {
       status: document.reviewState === 'received' ? 'pending' : document.reviewState === 'verified' || document.reviewState === 'rejected' || document.reviewState === 'replacement-required' ? document.reviewState : 'pending',
       note: document.reviewNote || '',
@@ -784,35 +787,90 @@ export default function App() {
 
   async function saveServiceAssessment() {
     if (!selected) return;
+    const unexplainedRejection = selected.documents.find((document) => {
+      const review = documentReviewStates[document.id];
+      return (review?.status === 'rejected' || review?.status === 'replacement-required') && !review.note.trim();
+    });
+    if (unexplainedRejection) {
+      setError(`Add a reason for rejecting or requesting a replacement for ${unexplainedRejection.label || 'the document'}.`);
+      return;
+    }
     setSaving(true);
     setError('');
     setNotice('');
+    let assessmentSaved = false;
     try {
+      const requirements = assessmentRequirements.map((requirement) => {
+        const document = selected.documents.find((item) => item.id === requirement.evidenceDocumentId
+          || normalizedDocumentLabel(item.label || '') === normalizedDocumentLabel(requirement.label));
+        const review = document && documentReviewStates[document.id];
+        const status: ServiceRequirement['status'] = !document
+          ? requirement.required ? 'missing' : 'not-applicable'
+          : review?.status === 'verified'
+            ? 'verified'
+            : review?.status === 'rejected'
+              ? 'rejected'
+              : 'received';
+        return {
+          ...requirement,
+          status,
+          evidenceDocumentId: document?.id || '',
+          note: status === 'not-applicable' ? 'Not required for this request.' : requirement.note || '',
+        };
+      });
+      const requirementsReady = requirements.every((requirement) => requirement.status === 'verified'
+        || (requirement.required === false && requirement.status === 'not-applicable'));
+      const documentsReady = selected.documents.every((document) => documentReviewStates[document.id]?.status === 'verified');
       const response = await fetch(`${apiBase}/admin/requests/${encodeURIComponent(selected.ref)}/service-assessment`, {
         method: 'PUT',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          requirementsReviewed: assessmentRequirementsReviewed,
-          requirements: assessmentRequirements,
+          requirementsReviewed: true,
+          requirements,
           documentReviews: selected.documents.map((document) => ({ documentId: document.id, ...(documentReviewStates[document.id] || { status: 'pending', note: '' }) })),
-          eligibility: assessmentEligibility,
-          governmentReadiness: assessmentGovernmentReadiness,
-          notes: assessmentNotes,
+          eligibility: requirementsReady && documentsReady ? 'eligible' : 'pending',
+          governmentReadiness: requirementsReady && documentsReady ? 'ready' : 'pending',
         }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Could not save the service assessment.');
+      assessmentSaved = true;
       setRequests((current) => current.map((record) => record.ref === result.ref ? result : record));
-      setNotice(result.serviceAssessmentReady ? 'Assessment complete. This request is ready for quote preparation.' : 'Assessment saved. Quote preparation remains blocked until all checks pass.');
+      let updated = result as RequestRecord;
+      if (updated.serviceAssessmentReady && updated.status === 'Awaiting Documents' && !(updated.requestedDocuments || []).length) {
+        const reviewResponse = await fetch(`${apiBase}/admin/requests/${encodeURIComponent(updated.ref)}`, {
+          method: 'PATCH',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'Under Review' }),
+        });
+        const reviewResult = await reviewResponse.json();
+        if (!reviewResponse.ok) throw new Error(reviewResult.error || 'Could not return the verified case to review.');
+        updated = reviewResult as RequestRecord;
+        setRequests((current) => current.map((record) => record.ref === updated.ref ? updated : record));
+      }
+      if (updated.serviceAssessmentReady && updated.allowedNextStatuses.includes('Quote Preparation')) {
+        const quoteResponse = await fetch(`${apiBase}/admin/requests/${encodeURIComponent(updated.ref)}`, {
+          method: 'PATCH',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'Quote Preparation' }),
+        });
+        const quoteResult = await quoteResponse.json();
+        if (!quoteResponse.ok) throw new Error(quoteResult.error || 'Could not open the quote workspace.');
+        updated = quoteResult as RequestRecord;
+        setRequests((current) => current.map((record) => record.ref === updated.ref ? updated : record));
+        setDraftStatus(updated.status);
+      }
+      setNotice(updated.status === 'Quote Preparation'
+        ? 'Documents verified. Ready for quote — the quote workspace is open.'
+        : updated.serviceAssessmentReady
+          ? 'Documents verified. This case is ready to move to quote preparation.'
+          : 'Document decisions saved. Resolve any missing or rejected items before preparing a quote.');
     } catch (assessmentError) {
-      setError(assessmentError instanceof Error ? assessmentError.message : 'Could not save the service assessment.');
+      const message = assessmentError instanceof Error ? assessmentError.message : 'Could not save document decisions.';
+      setError(assessmentSaved ? `Documents were saved, but the workflow could not advance: ${message}` : message);
     } finally {
       setSaving(false);
     }
-  }
-
-  function updateRequirement(requirementId: string, patch: Partial<ServiceRequirement>) {
-    setAssessmentRequirements((current) => current.map((requirement) => requirement.id === requirementId ? { ...requirement, ...patch } : requirement));
   }
 
   async function createCustomerTask(event: FormEvent<HTMLFormElement>) {
@@ -1029,74 +1087,140 @@ export default function App() {
           <div className="detail-contact"><a href={`mailto:${selected.email}`}>{selected.email || 'No email supplied'}</a><span>{selected.suburb}{selected.address ? ` · ${selected.address}` : ''}</span><span>Source: {selected.source === 'chatbot' ? 'Ask WeQ4U chat' : 'Website request'}</span></div>
           <div className="detail-section"><p className="detail-label">Requested service</p><div className="detail-tags">{selected.services.map((service) => <span key={service}>{serviceNames[service] || service}</span>)}{selected.courierCollection && <span>Courier collection requested</span>}{selected.courierDelivery && <span>Courier delivery requested</span>}{selected.courier && !selected.courierCollection && !selected.courierDelivery && <span>Courier option (legacy request)</span>}</div>{selected.serviceDetails && Object.entries(selected.serviceDetails).map(([service, answer]) => <p className="detail-muted" key={service}><strong>{serviceNames[service] || service}:</strong> {answer}</p>)}{selected.message && <p className="customer-message">“{selected.message}”</p>}</div>
           {selected.services.includes('vehicle-ownership-onboarding') && <div className="detail-section"><p className="detail-label">New vehicle request scope</p><p><strong>Purchase type:</strong> {selected.vehicleContext?.purchaseType || 'Not recorded'}</p><p><strong>Finance stage:</strong> {selected.vehicleContext?.financeStage || 'Not recorded'}</p>{selected.vehicleContext?.retailerName && <p><strong>Dealership:</strong> {selected.vehicleContext.retailerName}</p>}{selected.vehicleContext?.referralCode && <p><strong>Partner referral code:</strong> {selected.vehicleContext.referralCode}</p>}<ul className="ownership-admin-list">{(selected.workItems || []).map((item) => <li key={item}>{({ 'ownership-transfer': 'Help with vehicle ownership papers', registration: 'Register vehicle', 'licence-disc': 'Check licence disc and licensing steps', roadworthy: 'Help arrange roadworthy test', 'document-handover': 'Help with final vehicle papers', 'not-sure': 'Customer asked for guidance' } as Record<string, string>)[item] || item}</li>)}</ul><p className="detail-muted">These are requested services. Confirm the work scope and documents with the customer before processing.</p></div>}
-          <div className="detail-section"><p className="detail-label">Documents supplied</p>{selected.documents.length ? <div className="document-list">{selected.documents.map((document, index) => <button type="button" key={document.id} onClick={() => downloadDocument(document.id, index)}><FileText size={16} /><span>{document.label || `Document ${index + 1}`}<small>{document.serviceId ? `${serviceNames[document.serviceId] || document.serviceId} · ` : ''}{document.type} · {(document.size / 1024 / 1024).toFixed(1)} MB · encrypted at rest</small></span><Download size={15} /></button>)}</div> : <p className="detail-muted">No documents attached.</p>}</div>
-          <div className="detail-section"><p className="detail-label">Activity timeline</p><ol className="admin-timeline">{(selected.history || [{ status: selected.status, at: selected.updatedAt, message: "Current status" }]).slice().reverse().map((event, index) => <li key={index}><span className="timeline-dot" /><div><strong>{event.status}</strong><p>{event.message}</p><small>{new Date(event.at).toLocaleString()}</small></div></li>)}</ol><p className="detail-muted"><strong>Department:</strong> {selected.department || "Customer Support"} · <strong>Owner:</strong> {selected.assignee || "Unassigned"} · <strong>Next:</strong> {selected.nextAction || "Not set"}</p></div>
-          {selected.quote && <div className="detail-section quote-breakdown">
-            <p className="detail-label">{selected.quote.pricingBasis === 'case-specific-manual' ? 'Generated quote · case-specific' : `Generated quote · profile v${selected.quote.profileVersion}`}</p>
-            <div className="customer-quote-preview">
-              {selected.quote.pricingBasisLabel && <div className="quote-estimate-notice"><strong>{selected.quote.pricingBasisLabel}</strong><span>{selected.quote.estimateDisclaimer}</span></div>}
-              <div className="customer-quote-heading"><div><span>{selected.quote.profileName || 'Quotation ready to review'}</span><strong>{selected.quote.quoteNumber || selected.quote.id}</strong></div><span>Version {selected.quote.version || 1}</span></div>
-              <p>Package: <strong>{selected.quote.packageName || 'Standard'}</strong></p>
-              <p className="customer-quote-meta">Prepared {selected.quote.generatedAt ? new Date(selected.quote.generatedAt).toLocaleDateString('en-ZA') : 'date not recorded'}{selected.quote.validUntil ? ` · Valid until ${new Date(`${selected.quote.validUntil}T00:00:00`).toLocaleDateString('en-ZA')}` : ''}</p>
-              <div className="customer-quote-lines">{selected.quote.lines.map((line) => <div className="quote-line" key={line.componentId}><span>{line.label}{line.sourceNote && <small>Source: {line.sourceNote}</small>}</span><strong>{new Intl.NumberFormat('en-ZA', { style: 'currency', currency: selected.quoteCurrency || 'ZAR' }).format(line.amountCents / 100)}</strong></div>)}<div className="quote-line quote-total"><strong>Total</strong><strong>{new Intl.NumberFormat('en-ZA', { style: 'currency', currency: selected.quoteCurrency || 'ZAR' }).format(selected.quote.totalCents / 100)}</strong></div></div>
-              {selected.quote.vatTreatment && <p>VAT treatment: {selected.quote.vatTreatment === 'inclusive' ? 'Prices include VAT' : selected.quote.vatTreatment === 'exclusive' ? 'VAT added separately' : 'VAT not applicable'}</p>}
-              {!!selected.quote.conditions?.length && <div><strong>Conditions</strong><ul>{selected.quote.conditions.map((condition) => <li key={condition}>{condition}</li>)}</ul></div>}
-              {!!selected.quote.requiredDocuments?.length && <div><strong>Documents to provide</strong><ul>{selected.quote.requiredDocuments.map((document) => <li key={document}>{document}</li>)}</ul></div>}
-              {selected.quote.notes && <p>{selected.quote.notes}</p>}
-              {selected.quoteDecision
-                ? <p className="detail-muted">Decision recorded: <strong>{selected.quoteDecision}</strong>{selected.quoteDecisionAt ? ` · ${new Date(selected.quoteDecisionAt).toLocaleString('en-ZA')}` : ''}</p>
-                : <div className="quote-actions"><button type="button" disabled>Accept quote</button><button type="button" disabled>Decline</button></div>}
-              <small>Customer decision is made in the private tracking portal. Payment processing is not enabled.</small>
+          <section className="detail-section document-checklist-panel">
+            <p className="detail-label">Required documents checklist</p>
+            {!checklistRequirements.length && <p className="admin-hint">No approved service checklist is configured for this request. Quote eligibility remains blocked until the service is approved.</p>}
+            <div className="document-checklist">
+              {checklistRows.map(({ requirement, document }) => {
+                const review = document ? documentReviewStates[document.id] : undefined;
+                const status = !document
+                  ? requirement.required ? 'Missing' : 'Not required'
+                  : review?.status === 'verified'
+                    ? 'Approved'
+                    : review?.status === 'rejected'
+                      ? 'Rejected'
+                      : review?.status === 'replacement-required'
+                        ? 'Replacement required'
+                        : 'Pending review';
+                return <div className="document-checklist-row" key={requirement.id}>
+                  <span><strong>{requirement.label}</strong><small>{requirement.required ? 'Required' : 'Optional'}{document ? ` · ${document.type} · ${(document.size / 1024 / 1024).toFixed(1)} MB` : ' · Not received'}</small></span>
+                  {document
+                    ? <select aria-label={`Review ${requirement.label}`} value={review?.status || 'pending'} onChange={(event) => setDocumentReviewStates((current) => ({ ...current, [document.id]: { ...(current[document.id] || { note: '' }), status: event.target.value as 'pending' | 'verified' | 'rejected' | 'replacement-required' } }))}>
+                      <option value="pending">Pending review</option><option value="verified">Approve</option><option value="rejected">Reject</option><option value="replacement-required">Request replacement</option>
+                    </select>
+                    : <strong className="checklist-status">{status}</strong>}
+                  {document && <button type="button" className="admin-secondary-button" onClick={() => downloadDocument(document.id, selected.documents.indexOf(document))}><Download size={14} /> Open evidence</button>}
+                  {document && (review?.status === 'rejected' || review?.status === 'replacement-required') && <input className="document-review-note" aria-label={`Reason for ${requirement.label} decision`} value={review.note} onChange={(event) => setDocumentReviewStates((current) => ({ ...current, [document.id]: { ...current[document.id], note: event.target.value } }))} placeholder="Reason for this decision" maxLength={300} />}
+                  {document && <small className="document-review-meta">{document.reviewedBy ? `Last saved by ${document.reviewedBy}${document.reviewedAt ? ` · ${new Date(document.reviewedAt).toLocaleString()}` : ''}` : ''}</small>}
+                </div>;
+              })}
+              {additionalDocuments.map((document) => {
+                const review = documentReviewStates[document.id];
+                return <div className="document-checklist-row" key={document.id}>
+                  <span><strong>{document.label || 'Additional document'}</strong><small>{document.type} · {(document.size / 1024 / 1024).toFixed(1)} MB · Additional evidence</small></span>
+                  <select aria-label={`Review ${document.label || 'additional document'}`} value={review?.status || 'pending'} onChange={(event) => setDocumentReviewStates((current) => ({ ...current, [document.id]: { ...(current[document.id] || { note: '' }), status: event.target.value as 'pending' | 'verified' | 'rejected' | 'replacement-required' } }))}>
+                    <option value="pending">Pending review</option><option value="verified">Approve</option><option value="rejected">Reject</option><option value="replacement-required">Request replacement</option>
+                  </select>
+                  <button type="button" className="admin-secondary-button" onClick={() => downloadDocument(document.id, selected.documents.indexOf(document))}><Download size={14} /> Open evidence</button>
+                  {(review?.status === 'rejected' || review?.status === 'replacement-required') && <input className="document-review-note" aria-label={`Reason for ${document.label || 'additional document'} decision`} value={review.note} onChange={(event) => setDocumentReviewStates((current) => ({ ...current, [document.id]: { ...current[document.id], note: event.target.value } }))} placeholder="Reason for this decision" maxLength={300} />}
+                </div>;
+              })}
+              {!selected.documents.length && checklistRequirements.length > 0 && <p className="detail-muted">No documents received yet.</p>}
             </div>
-          </div>}
-            {staff?.permissions.includes('requests:update') && <section className="detail-section service-assessment-panel">
-              <p className="detail-label">Service assessment · quote readiness</p>
-                {selected.serviceDefinition && <div className="service-definition-banner"><strong>{selected.serviceDefinition.serviceName}</strong><span>{selected.serviceDefinition.serviceCode} · Definition v{selected.serviceDefinition.version} · {selected.serviceDefinition.configurationStatus === 'provisional-pilot' ? 'Provisional pilot configuration' : selected.serviceDefinition.configurationStatus.replace(/-/g, ' ')}</span>{!selected.serviceDefinitionReady && <small>This service template is awaiting business approval. Its draft requirements must be confirmed before quoting.</small>}{selected.serviceDefinition.configurationStatus === 'provisional-pilot' && <small>Owner-authorized pilot checklist and provisional service-fee range. Confirm the requirements and exclusions during pilot review.</small>}</div>}
-              <p className="detail-muted">Review the case requirements and evidence before building a quote. Do not infer government requirements from uploaded files; record the source used for each verified requirement.</p>
-              <label className="check-field"><input type="checkbox" checked={assessmentRequirementsReviewed} onChange={(event) => setAssessmentRequirementsReviewed(event.target.checked)} /> I reviewed the applicable service requirements for this case.</label>
-              <div className="assessment-requirements">
-                <strong>Requirements checklist</strong>
-                {assessmentRequirements.map((requirement) => <div className="assessment-row" key={requirement.id}>
-                  <span>{requirement.label}{requirement.required ? ' · required' : ' · optional'}</span>
-                  <select aria-label={`${requirement.label} assessment`} value={requirement.status} onChange={(event) => updateRequirement(requirement.id, { status: event.target.value as ServiceRequirement['status'] })}>
-                    <option value="received">Received</option><option value="missing">Missing</option><option value="verified">Verified</option><option value="rejected">Rejected</option><option value="not-applicable">Not applicable</option>
-                  </select>
-                  <select aria-label={`${requirement.label} evidence`} value={requirement.evidenceDocumentId || ''} onChange={(event) => updateRequirement(requirement.id, { evidenceDocumentId: event.target.value })}>
-                    <option value="">No linked evidence</option>{selected.documents.map((document) => <option key={document.id} value={document.id}>{document.label || document.id}</option>)}
-                  </select>
-                  <input aria-label={`${requirement.label} note`} value={requirement.note || ''} onChange={(event) => updateRequirement(requirement.id, { note: event.target.value })} placeholder="Assessment note" maxLength={300} />
-                  {needsCaseSpecificAssessment && <button className="admin-secondary-button" type="button" aria-label={`Remove ${requirement.label}`} onClick={() => setAssessmentRequirements((current) => current.filter((item) => item.id !== requirement.id))}>Remove</button>}
-                </div>)}
-                {!assessmentRequirements.length && <p className="admin-hint">No requirements are configured. Add case-specific requirements and record their authoritative sources before marking them verified.</p>}
-                {needsCaseSpecificAssessment && <form className="assessment-add-requirement" onSubmit={(event) => { event.preventDefault(); const label = newRequirement.trim(); if (!label) return; setAssessmentRequirements((current) => [...current, { id: crypto.randomUUID(), label, required: true, status: 'received' }]); setNewRequirement(''); }}>
-                  <input aria-label="New requirement" value={newRequirement} onChange={(event) => setNewRequirement(event.target.value)} placeholder="Add a case-specific requirement" maxLength={160} />
-                  <button className="admin-secondary-button" type="submit" disabled={!newRequirement.trim()}>Add case requirement</button>
-                </form>}
+            {(selected.requestedDocuments || []).length > 0 && <p className="admin-hint">Waiting for the customer to provide: {(selected.requestedDocuments || []).join(', ')}</p>}
+            <div className="document-checklist-actions">
+              <button type="button" className="admin-primary-button" disabled={saving || !selected.documents.length} onClick={saveServiceAssessment}>{saving ? 'Saving decisions…' : 'Save document decisions'} <span>→</span></button>
+              {notice && <p className="admin-success" role="status">{notice}</p>}
+              {error && <p className="admin-error" role="alert">{error}</p>}
+            </div>
+          </section>
+          <details className="detail-section optional-details">
+            <summary>Activity and routing history</summary>
+            <ol className="admin-timeline">{(selected.history || [{ status: selected.status, at: selected.updatedAt, message: "Current status" }]).slice().reverse().map((event, index) => <li key={index}><span className="timeline-dot" /><div><strong>{event.status}</strong><p>{event.message}</p><small>{new Date(event.at).toLocaleString()}</small></div></li>)}</ol>
+            <p className="detail-muted"><strong>Department:</strong> {selected.department || "Customer Support"} · <strong>Owner:</strong> {selected.assignee || "Unassigned"} · <strong>Next:</strong> {selected.nextAction || "Not set"}</p>
+          </details>
+          {staff?.permissions.includes('requests:update') && <>
+            <section className="detail-section quote-eligibility">
+              <p className="detail-label">Quote eligibility</p>
+              <div className={`eligibility-result ${quoteReadyForPreparation ? 'is-ready' : ''}`} role="status">
+                <strong>{quoteReadyForPreparation ? 'READY FOR QUOTE' : selected.serviceAssessmentReady ? 'DOCUMENTS VERIFIED · QUOTE SETUP REQUIRED' : 'NOT READY'}</strong>
+                <span>{!selected.serviceAssessmentReady
+                  ? 'Approve each required document and resolve outstanding document requests.'
+                  : selected.serviceDefinitionReady === false
+                    ? 'This service checklist is awaiting business approval before a customer quote can be issued.'
+                  : !selected.quoteReadiness?.ready
+                    ? selected.quoteReadiness?.reason || selected.pricingResolution?.reason || 'This service variant is not approved for customer quoting.'
+                    : !selected.pricingResolution?.preview.ready
+                      ? selected.pricingResolution?.reason || 'An active approved pricing profile is required.'
+                      : 'All required documents are approved and the approved price is available.'}</span>
               </div>
-              <div className="assessment-documents">
-                <strong>Document verification</strong>
-                {selected.documents.length ? selected.documents.map((document, index) => <div className="assessment-row" key={document.id}>
-                  <span>{document.label || `Document ${index + 1}`}<small>{document.reviewedBy ? `Reviewed by ${document.reviewedBy}${document.reviewedAt ? ` · ${new Date(document.reviewedAt).toLocaleString()}` : ''}` : 'Not reviewed'}</small></span>
-                  <select aria-label={`Review ${document.label || 'document'}`} value={documentReviewStates[document.id]?.status || 'pending'} onChange={(event) => setDocumentReviewStates((current) => ({ ...current, [document.id]: { ...(current[document.id] || { note: '' }), status: event.target.value as 'pending' | 'verified' | 'rejected' | 'replacement-required' } }))}>
-                    <option value="pending">Pending</option><option value="verified">Verified</option><option value="rejected">Rejected</option><option value="replacement-required">Replacement required</option>
-                  </select>
-                  <input aria-label={`Review note for ${document.label || 'document'}`} value={documentReviewStates[document.id]?.note || ''} onChange={(event) => setDocumentReviewStates((current) => ({ ...current, [document.id]: { ...(current[document.id] || { status: 'pending' }), note: event.target.value } }))} placeholder="Reason or verification note" maxLength={300} />
-                  <button type="button" className="admin-secondary-button" onClick={() => downloadDocument(document.id, index)}><Download size={14} /> Open evidence</button>
-                </div>) : <p className="admin-hint">No evidence has been uploaded.</p>}
-              </div>
-              <div className="assessment-decisions">
-                <label>Service eligibility<select value={assessmentEligibility} onChange={(event) => setAssessmentEligibility(event.target.value as ServiceAssessment['eligibility'])}><option value="pending">Not assessed</option><option value="eligible">Eligible</option><option value="ineligible">Ineligible</option></select></label>
-                <label>Government process readiness<select value={assessmentGovernmentReadiness} onChange={(event) => setAssessmentGovernmentReadiness(event.target.value as ServiceAssessment['governmentReadiness'])}><option value="pending">Not assessed</option><option value="ready">Ready for quotation</option><option value="not-ready">Not ready</option></select></label>
-              </div>
-              <label className="assessment-notes">Assessment notes<textarea rows={3} value={assessmentNotes} onChange={(event) => setAssessmentNotes(event.target.value)} maxLength={1000} placeholder="Record case-specific findings, exceptions, or the source of the applicable requirement." /></label>
-              <div className={`assessment-readiness ${selected.serviceAssessmentReady ? 'is-ready' : ''}`} role="status">{selected.serviceAssessmentReady ? 'Assessment complete · ready for quote preparation' : 'Not ready for quote preparation · finish all required checks and verify all uploaded documents'}</div>
-              <button type="button" className="admin-primary-button" disabled={saving} onClick={saveServiceAssessment}>{saving ? 'Saving assessment…' : 'Save service assessment'} <span>→</span></button>
-            </section>}
-          {!!selected.quoteRevisionRequests?.length && <div className="detail-section quote-breakdown"><p className="detail-label">Customer quote change requests</p>{selected.quoteRevisionRequests.map((request, index) => <p className="customer-message" key={`${request.quoteVersion}-${request.requestedAt}-${index}`}><strong>Quote v{request.quoteVersion} · {new Date(request.requestedAt).toLocaleString('en-ZA')}</strong><br />{request.message}</p>)}</div>}
-          {!!selected.quoteActionAudit?.length && <div className="detail-section quote-breakdown"><p className="detail-label">Quote decision audit · staff only</p><ul className="quote-audit-list">{selected.quoteActionAudit.slice().reverse().map((entry, index) => <li key={`${entry.quoteId}-${entry.action}-${entry.at}-${index}`}><strong>Quote v{entry.quoteVersion} · {entry.action}</strong><span>{new Date(entry.at).toLocaleString('en-ZA')} · IP {entry.ip}</span></li>)}</ul><p className="detail-muted">Audit records are stored in the encrypted request store and visible only to authorized staff.</p></div>}
-          {!selected.quote && selected.quoteAmount !== null && <p className="detail-muted">Legacy quote: {new Intl.NumberFormat('en-ZA', { style: 'currency', currency: selected.quoteCurrency || 'ZAR' }).format(selected.quoteAmount)} · manually entered before pricing profiles were introduced.</p>}
-          {staff?.permissions.includes('requests:update') && <section className="detail-section customer-task-panel">
-            <p className="detail-label">Customer actions · you or WeQ4U can act next</p>
+              {selected.serviceDefinition && !selected.serviceDefinitionReady && <p className="admin-hint">This service checklist is awaiting business approval; customer quotes remain blocked.</p>}
+            </section>
+            <section className="detail-section quote-workspace">
+              <p className="detail-label">Quote workspace</p>
+              {selected.pricingResolution && <>
+                <div className="quote-service-context">
+                  <strong>{selected.pricingResolution.serviceName}</strong>
+                  <span>{selected.pricingResolution.serviceDetail || 'Service details not specified'} · {selected.pricingResolution.packageName}</span>
+                </div>
+                {selected.pricingResolution.preview.ready
+                  ? <div className="live-quote-preview">
+                    <p className="detail-muted">Customer price preview · approved profile v{selected.pricingResolution.profileVersion}</p>
+                    {selected.pricingResolution.preview.lines.map((line) => <div className="quote-line" key={line.componentId}><span>{line.label}</span><strong>{new Intl.NumberFormat('en-ZA', { style: 'currency', currency: selected.pricingResolution!.preview.currency }).format(line.amountCents / 100)}</strong></div>)}
+                    {selected.pricingResolution.preview.totalCents !== null && <div className="quote-line quote-total"><strong>Total</strong><strong>{new Intl.NumberFormat('en-ZA', { style: 'currency', currency: selected.pricingResolution.preview.currency }).format(selected.pricingResolution.preview.totalCents / 100)}</strong></div>}
+                  </div>
+                  : <div className="quote-blockers" role="status"><strong>Price not yet available</strong><span>{selected.pricingResolution.reason || selected.quoteReadiness?.reason || 'An active approved pricing profile is required.'}</span></div>}
+                {selected.services.length > 1 && <p className="admin-hint">Only the primary requested service is included in this quote preview.</p>}
+              </>}
+              {!selected.pricingResolution && <p className="admin-hint">A quote preview will appear when this service has an approved pricing profile.</p>}
+              <label>Quote notes for the customer<textarea rows={2} value={draftQuoteNotes} onChange={(event) => setDraftQuoteNotes(event.target.value)} placeholder="Explain what is included and any important conditions." /></label>
+              <label>Conditions <span className="field-note">Optional; one per line, up to 4.</span><textarea rows={2} maxLength={500} value={draftQuoteConditions} onChange={(event) => setDraftQuoteConditions(event.target.value)} placeholder="For example: Price is based on the confirmed service scope." /></label>
+              <label>Quote valid until<input type="date" min={tomorrowKey()} max={quoteMaximumValidUntil()} value={draftQuoteValidUntil} onChange={(event) => setDraftQuoteValidUntil(event.target.value)} /></label>
+              {selected.status === 'Quote Preparation' && !quotePreparationReady && <div className="quote-blockers" role="status">
+                <strong>Quote preparation is blocked until these checks pass:</strong>
+                <ul>
+                  {!selected.serviceAssessmentReady && <li>Approve all required documents and resolve any outstanding document requests.</li>}
+                  {selected.serviceDefinitionReady === false && <li>This service checklist is awaiting business approval.</li>}
+                  {!selected.quoteReadiness?.ready && <li>{selected.quoteReadiness?.reason || selected.pricingResolution?.reason || 'This service variant is not approved for customer quoting.'}</li>}
+                  {selected.quoteReadiness?.ready && !selected.pricingResolution?.preview.ready && <li>{selected.pricingResolution?.reason || 'An active approved pricing profile is required.'}</li>}
+                  {!draftQuoteValidUntil && <li>Set the quote validity date.</li>}
+                </ul>
+              </div>}
+              {selected.status === 'Quote Preparation' && !selected.quoteReadiness?.ready && staff.permissions.includes('requests:read') && <button className="admin-secondary-button" type="button" disabled={saving} onClick={downloadRegistryReview}>Download internal registry review</button>}
+              {selected.status === 'Quote Preparation' && <button className="admin-primary-button" type="button" onClick={generateSelectedQuote} disabled={saving || !quotePreparationReady}>
+                {saving ? 'Preparing…' : !quotePreparationReady ? 'Quote blocked · complete checks' : selected.quoteDraft?.lines ? 'Prepare updated draft' : 'Prepare quote for approval'} <span>→</span>
+              </button>}
+              {selected.status !== 'Quote Preparation' && <p className="detail-muted">The quote workspace is ready to use as soon as the required documents are approved.</p>}
+              {selected.quoteDraft?.lines && <div className="live-quote-preview quote-draft-preview">
+                <p className="detail-label">Quote {selected.quoteDraft.quoteNumber || 'draft'} · version {selected.quoteDraft.version || 1}</p>
+                <div className="quote-lifecycle-rail">{['Draft', 'Pending approval', 'Approved', 'Published'].map((stage, index) => <span key={stage} className={`quote-stage ${selected.quoteDraft?.approvalStatus === 'approved' && index >= 2 ? 'active' : selected.quoteDraft?.approvalStatus === 'pending-approval' && index >= 1 ? 'active' : selected.quoteDraft?.approvalStatus === 'editing' && index === 0 ? 'active' : ''}`}>{stage}</span>)}</div>
+                <div className="customer-quote-lines">{selected.quoteDraft.lines.map((line) => <div className="quote-line" key={line.componentId}><span>{line.label}{line.sourceNote && <small>Price source: {line.sourceNote}</small>}</span><strong>{new Intl.NumberFormat('en-ZA', { style: 'currency', currency: selected.quoteCurrency || 'ZAR' }).format(line.amountCents / 100)}</strong></div>)}<div className="quote-line quote-total"><strong>Total</strong><strong>{new Intl.NumberFormat('en-ZA', { style: 'currency', currency: selected.quoteCurrency || 'ZAR' }).format((selected.quoteDraft.totalCents || 0) / 100)}</strong></div></div>
+                <p><strong>Valid until:</strong> {selected.quoteDraft.validUntil || 'Not set'}{selected.quoteDraft.approvedBy ? ` · Approved by ${selected.quoteDraft.approvedBy}` : ''}</p>
+                <div className="quote-preview-actions">
+                  {selected.quoteDraft.approvalStatus === 'pending-approval' && <><p className="admin-hint">A different authorized supervisor must approve this quote.</p><button className="admin-primary-button" type="button" disabled={saving || selected.quoteDraft.preparedBy === staff.name} onClick={() => updateQuoteDraft('approve')}>Approve quote</button></>}
+                  {selected.quoteDraft.approvalStatus === 'approved' && selected.status === 'Quote Preparation' && <button className="admin-primary-button" type="button" disabled={saving} onClick={() => updateQuoteDraft('publish')}>Publish quote to customer</button>}
+                </div>
+              </div>}
+              {selected.quote && <div className="published-quote-preview">
+                <p className="detail-label">Customer quote · {selected.quote.quoteNumber || selected.quote.id} · version {selected.quote.version || 1}</p>
+                {selected.quote.pricingBasisLabel && <div className="quote-estimate-notice"><strong>{selected.quote.pricingBasisLabel}</strong><span>{selected.quote.estimateDisclaimer}</span></div>}
+                <div className="customer-quote-lines">{selected.quote.lines.map((line) => <div className="quote-line" key={line.componentId}><span>{line.label}{line.sourceNote && <small>Source: {line.sourceNote}</small>}</span><strong>{new Intl.NumberFormat('en-ZA', { style: 'currency', currency: selected.quoteCurrency || 'ZAR' }).format(line.amountCents / 100)}</strong></div>)}<div className="quote-line quote-total"><strong>Total</strong><strong>{new Intl.NumberFormat('en-ZA', { style: 'currency', currency: selected.quoteCurrency || 'ZAR' }).format(selected.quote.totalCents / 100)}</strong></div></div>
+                <p>Valid until {selected.quote.validUntil || 'not set'} · Customer decision: {selected.quoteDecision || 'awaiting customer'}</p>
+                {selected.quoteDecisionAt && <p className="detail-muted">Decision recorded {new Date(selected.quoteDecisionAt).toLocaleString('en-ZA')}</p>}
+                {!!selected.quote.conditions?.length && <p><strong>Conditions:</strong> {selected.quote.conditions.join(' · ')}</p>}
+                {selected.quote.notes && <p>{selected.quote.notes}</p>}
+                <small>Customer acceptance is recorded in the private tracking portal. Payment processing is not enabled.</small>
+              </div>}
+              {!selected.quote && selected.quoteAmount !== null && <p className="detail-muted">Legacy quote: {new Intl.NumberFormat('en-ZA', { style: 'currency', currency: selected.quoteCurrency || 'ZAR' }).format(selected.quoteAmount)} · manually entered before pricing profiles were introduced.</p>}
+            </section>
+          </>}
+          {(!!selected.quoteRevisionRequests?.length || !!selected.quoteActionAudit?.length) && <details className="detail-section optional-details">
+            <summary>Quote history and audit trail</summary>
+            {!!selected.quoteRevisionRequests?.length && <div className="quote-breakdown"><p className="detail-label">Customer quote change requests</p>{selected.quoteRevisionRequests.map((request, index) => <p className="customer-message" key={`${request.quoteVersion}-${request.requestedAt}-${index}`}><strong>Quote v{request.quoteVersion} · {new Date(request.requestedAt).toLocaleString('en-ZA')}</strong><br />{request.message}</p>)}</div>}
+            {!!selected.quoteActionAudit?.length && <div className="quote-breakdown"><p className="detail-label">Quote decision audit · staff only</p><ul className="quote-audit-list">{selected.quoteActionAudit.slice().reverse().map((entry, index) => <li key={`${entry.quoteId}-${entry.action}-${entry.at}-${index}`}><strong>Quote v{entry.quoteVersion} · {entry.action}</strong><span>{new Date(entry.at).toLocaleString('en-ZA')} · IP {entry.ip}</span></li>)}</ul><p className="detail-muted">Audit records are stored in the encrypted request store and visible only to authorized staff.</p></div>}
+          </details>}
+          {staff?.permissions.includes('requests:update') && <details className="detail-section optional-details customer-task-panel">
+            <summary>Other customer actions (optional)</summary>
             {(selected.customerTasks || []).length
               ? <div className="customer-task-list">{selected.customerTasks!.slice().reverse().map((task) => <article key={task.id}>
                 <header><strong>{task.title}</strong><span className={`customer-task-status task-${task.status}`}>{task.status.replace(/-/g, ' ')}</span></header>
@@ -1115,83 +1239,16 @@ export default function App() {
               <label>Optional due date<input type="date" value={customerTaskDueDate} onChange={(event) => { setCustomerTaskDueDate(event.target.value); setCustomerTaskDirty(true); }} /></label>
               <button className="admin-primary-button" type="submit" disabled={saving}>{saving ? 'Saving...' : 'Send customer action'} <span>→</span></button>
             </form>
-          </section>}
-          {staff?.permissions.includes('requests:update') ? <form className="request-update-form" onSubmit={saveRequest}>
-            <p className="detail-label">Customer journey and work routing</p>
+          </details>}
+          {staff?.permissions.includes('requests:update') ? <details className="detail-section optional-details">
+            <summary>Additional case administration</summary>
+            <form className="request-update-form" onSubmit={saveRequest}>
+            <p className="detail-label">Other workflow changes, assignment and internal notes</p>
             <label>Workflow stage<select value={draftStatus} onChange={(event) => { setDraftStatus(event.target.value); setDraftAssignee(''); }}>
               {[...new Set([selected.status, ...(selected.allowedNextStatuses || [])])].map((status) => <option key={status}>{status}</option>)}
             </select></label>
             <p className="detail-muted">Routed automatically to <strong>{selected.department || 'Customer Support'}</strong> · {selected.queue || 'New Requests'}. The customer sees a simple progress update, not this internal queue name.</p>
             {draftStatus === 'Awaiting Documents' && <label>What is missing? <span className="field-note">One item per line; customers can upload these from their private tracking page.</span><textarea rows={3} value={draftRequestedDocuments} onChange={(event) => setDraftRequestedDocuments(event.target.value)} placeholder="Copy of ID&#10;Medical certificate" /></label>}
-            {draftStatus === 'Quote Preparation' && <>
-              <p className="admin-hint">Customer quotes can be prepared only for a registry-approved service variant with an active pricing profile. Other requests stay in internal review until the service scope, checklist and price are approved.</p>
-              <label>Quote notes for the customer<textarea rows={3} value={draftQuoteNotes} onChange={(event) => setDraftQuoteNotes(event.target.value)} placeholder="Explain what is included and any important conditions." /></label>
-              <label>Conditions <span className="field-note">Optional; one per line, up to 4.</span><textarea rows={2} maxLength={500} value={draftQuoteConditions} onChange={(event) => setDraftQuoteConditions(event.target.value)} placeholder="For example: Price is based on the confirmed service scope." /></label>
-              <label>Quote valid until<input type="date" min={tomorrowKey()} max={quoteMaximumValidUntil()} value={draftQuoteValidUntil} onChange={(event) => setDraftQuoteValidUntil(event.target.value)} /></label>
-              {selected.pricingResolution && <div className="pricing-resolution">
-                <p className="detail-label">Pricing profile resolution</p>
-                {selected.services.length > 1 && <p className="admin-hint">Only the primary service is currently included in this quote preview. Other requested services are not included in this quote.</p>}
-                <dl>
-                  <div><dt>Detected service</dt><dd>{selected.pricingResolution.serviceName} <code>{selected.pricingResolution.serviceId}</code></dd></div>
-                  <div><dt>Request detail</dt><dd>{selected.pricingResolution.serviceDetail || 'Not specified'}</dd></div>
-                  <div><dt>Selected package</dt><dd>{selected.pricingResolution.packageName}</dd></div>
-                  <div><dt>Expected profile</dt><dd>{selected.pricingResolution.expectedProfileName} <code>{selected.pricingResolution.expectedProfileId}</code></dd></div>
-                  <div><dt>Profile status</dt><dd>{selected.pricingResolution.profileStatus.toUpperCase()} · {selected.pricingResolution.status.replace(/-/g, ' ')}</dd></div>
-                  <div><dt>Version / effective from</dt><dd>{selected.pricingResolution.profileVersion === null ? 'No version' : `v${selected.pricingResolution.profileVersion}`} · {selected.pricingResolution.effectiveFrom || 'Not set'}</dd></div>
-                </dl>
-                {!selected.pricingResolution.preview.ready && <p className="admin-hint">{selected.pricingResolution.reason || selected.quoteReadiness?.reason || 'A matching active profile is not ready.'}</p>}
-                {selected.pricingResolution.availableProfiles.length > 0 && <p className="detail-muted">Other active profiles: {selected.pricingResolution.availableProfiles.map((profile) => `${profile.name} (${profile.serviceId}, v${profile.version})`).join(' · ')}</p>}
-                {selected.pricingResolution.preview.ready && <div className="live-quote-preview">
-                  <p className="detail-label">Customer quote preview</p>
-                  <p className="detail-muted">This is a live price preview. It will be saved as a fixed snapshot and reviewed before it is sent.</p>
-                  {selected.pricingResolution.preview.lines.map((line) => <div className="quote-line" key={line.componentId}><span>{line.label}</span><strong>{new Intl.NumberFormat('en-ZA', { style: 'currency', currency: selected.pricingResolution!.preview.currency }).format(line.amountCents / 100)}</strong></div>)}
-                  {selected.pricingResolution.preview.totalCents !== null && <div className="quote-line quote-total"><strong>Total</strong><strong>{new Intl.NumberFormat('en-ZA', { style: 'currency', currency: selected.pricingResolution.preview.currency }).format(selected.pricingResolution.preview.totalCents / 100)}</strong></div>}
-                  {selected.pricingResolution.preview.contributionCents !== null && <p className="detail-muted">Model contribution (30%): {new Intl.NumberFormat('en-ZA', { style: 'currency', currency: selected.pricingResolution.preview.currency }).format(selected.pricingResolution.preview.contributionCents / 100)} · planning assumption, not audited profit</p>}
-                </div>}
-              </div>}
-              {selected.quoteDraft?.lines && <div className="live-quote-preview quote-draft-preview">
-                <p className="detail-label">Internal quote preview</p>
-                <div className="quote-lifecycle-rail">
-                  {['Draft', 'Pending approval', 'Approved', 'Published'].map((stage, index) => (
-                    <span key={stage} className={`quote-stage ${selected.quoteDraft?.approvalStatus === 'approved' && index >= 2 ? 'active' : selected.quoteDraft?.approvalStatus === 'pending-approval' && index >= 1 ? 'active' : selected.quoteDraft?.approvalStatus === 'editing' && index === 0 ? 'active' : ''}`}>
-                      {stage}
-                    </span>
-                  ))}
-                </div>
-                <div className="customer-quote-heading"><div><span>Quote preview</span><strong>{selected.quoteDraft.quoteNumber || 'Quote draft'}</strong></div><span>Version {selected.quoteDraft.version || 1}</span></div>
-                <div className="customer-quote-preview">
-                  {selected.quoteDraft.pricingBasisLabel && <div className="quote-estimate-notice"><strong>{selected.quoteDraft.pricingBasisLabel}</strong><span>{selected.quoteDraft.estimateDisclaimer}</span></div>}
-                  <p><strong>Service:</strong> {selected.pricingResolution?.serviceName || selected.services[0] || 'Not specified'}</p>
-                  <p><strong>Package:</strong> {selected.quoteDraft.packageName || 'Standard'}</p>
-                  <div className="customer-quote-lines">{selected.quoteDraft.lines?.map((line) => <div className="quote-line" key={line.componentId}><span>{line.label}{line.sourceNote && <small>Internal price source: {line.sourceNote}</small>}</span><strong>{new Intl.NumberFormat('en-ZA', { style: 'currency', currency: selected.quoteCurrency || 'ZAR' }).format(line.amountCents / 100)}</strong></div>)}<div className="quote-line quote-total"><strong>Total</strong><strong>{new Intl.NumberFormat('en-ZA', { style: 'currency', currency: selected.quoteCurrency || 'ZAR' }).format((selected.quoteDraft.totalCents || 0) / 100)}</strong></div></div>
-                  <p><strong>Valid until:</strong> {selected.quoteDraft.validUntil ? new Date(`${selected.quoteDraft.validUntil}T00:00:00`).toLocaleDateString('en-ZA') : 'Not set'}</p>
-                  {!!selected.quoteDraft.conditions?.length && <div><strong>Conditions</strong><ul>{selected.quoteDraft.conditions.map((condition) => <li key={condition}>{condition}</li>)}</ul></div>}
-                  {!!selected.quoteDraft.requiredDocuments?.length && <div><strong>Required documents</strong><ul>{selected.quoteDraft.requiredDocuments.map((document) => <li key={document}>{document}</li>)}</ul></div>}
-                  {selected.quoteDraft.notes && <p><strong>What happens next:</strong> {selected.quoteDraft.notes}</p>}
-                  {selected.quoteDraft.approvedBy && <p><strong>Approved by:</strong> {selected.quoteDraft.approvedBy} {selected.quoteDraft.approvedAt ? `· ${new Date(selected.quoteDraft.approvedAt).toLocaleString('en-ZA')}` : ''}</p>}
-                </div>
-                <div className="quote-preview-actions">
-                  <button className="admin-secondary-button" type="button" onClick={() => setDraftQuoteNotes(selected.quoteDraft?.notes || '')}>Edit quote</button>
-                  {selected.quoteDraft.approvalStatus === 'pending-approval' && <><p className="admin-hint">Approval must be completed by an authorized reviewer other than the quote preparer.</p><button className="admin-primary-button" type="button" disabled={saving || selected.quoteDraft.preparedBy === staff?.name} onClick={() => updateQuoteDraft('approve')}>Approve quote</button></>}
-                  {selected.quoteDraft.approvalStatus === 'approved' && <button className="admin-primary-button" type="button" disabled={saving || !staff?.permissions.includes('requests:update')} onClick={() => updateQuoteDraft('publish')}>Send to customer</button>}
-                </div>
-              </div>}
-              {selected.status === 'Quote Preparation' && <>
-                {!selected.quoteReadiness?.ready && staff?.permissions.includes('requests:read') && <button className="admin-secondary-button" type="button" disabled={saving} onClick={downloadRegistryReview}>Download internal registry review</button>}
-                {!quotePreparationReady && <div className="quote-blockers" role="status">
-                  <strong>{selected.quoteReadiness?.ready ? 'Quote preparation is blocked until these checks pass:' : 'Customer quotation is not approved for this service variant:'}</strong>
-                  <ul>
-                    {!selected.quoteReadiness?.ready && <li>{selected.quoteReadiness?.reason || selected.pricingResolution?.reason || 'An approved service variant and active pricing profile are required.'}</li>}
-                    {!selected.serviceAssessmentReady && <li>Save a complete service assessment: resolve every source-documented requirement, verify every uploaded document, and confirm eligibility and government readiness.</li>}
-                    {!draftQuoteValidUntil && <li>Set the quote validity date.</li>}
-                  </ul>
-                </div>}
-                <button className="admin-primary-button" type="button" onClick={generateSelectedQuote} disabled={saving || !quotePreparationReady}>
-                  {saving ? 'Preparing…' : !quotePreparationReady ? 'Quote blocked · complete checks' : selected.quoteDraft?.lines ? 'Prepare updated draft' : 'Prepare quote for approval'} <span>→</span>
-                </button>
-              </>}
-              {selected.status !== 'Quote Preparation' && <p className="admin-hint">Save this stage first. Then you can prepare, approve and publish a quote as separate steps.</p>}
-            </>}
             {draftStatus === 'Awaiting Customer Decision' && selected.status !== 'Awaiting Customer Decision' && <>
               <label className="check-field"><input type="checkbox" checked={draftQuoteCommunicationConfirmed} onChange={(event) => setDraftQuoteCommunicationConfirmed(event.target.checked)} /> I confirmed that the quote is available to the customer in Track Request.</label>
               <label>Customer quote channel<select value={draftQuoteCommunicationChannel} onChange={(event) => setDraftQuoteCommunicationChannel(event.target.value)}><option value="portal">Private tracking portal</option><option value="phone">Phone</option><option value="whatsapp">WhatsApp</option><option value="email">Email</option><option value="in-person">In person</option></select></label>
@@ -1206,7 +1263,8 @@ export default function App() {
             <label>Internal notes<textarea rows={3} value={draftNotes} onChange={(event) => setDraftNotes(event.target.value)} placeholder="Visible to authorised staff only" /></label>
             <button className="admin-primary-button" type="submit" disabled={saving}>{saving ? 'Saving...' : 'Save workflow update'} <span>→</span></button>
             {notice && <p className="admin-success" role="status">{notice}</p>}{error && <p className="admin-error" role="alert">{error}</p>}
-          </form> : <p className="admin-hint">Finance queue is read-only and shows accepted quotes needing payment setup. Payment collection is not configured, so do not start fulfilment or record payment here.</p>}
+            </form>
+          </details> : <p className="admin-hint">Finance queue is read-only and shows accepted quotes needing payment setup. Payment collection is not configured, so do not start fulfilment or record payment here.</p>}
         </> : <div className="detail-empty"><span className="admin-empty-mark"><FileText size={22} /></span><strong>Select a request</strong><p>Request details and management tools will appear here.</p></div>}</section>
       </div>}
     </section>

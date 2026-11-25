@@ -29,6 +29,10 @@ npm run dev
 
 The development servers start in the background on fixed local ports. Run `npm run dev:stop` from the repository root to stop the API, storefront and admin processes started by this project. Startup logs and process IDs are kept under the ignored `.dev` directory. If a port is occupied by a process this project did not start, startup reports its PID and leaves it untouched.
 
+Local development also seeds the three synthetic quote-demo references into the API's encrypted private store when they are missing. They remain available to both the storefront and admin after restarts; existing demo cases are never reset or overwritten. These fictional records are local test data, not customer requests or commercial offers.
+
+For the isolated quote-demo environment, run `npm run demo:quotes`. It starts the storefront/admin on ports 3000/3001 and starts the test API on port 4100 if needed. That API keeps its own encrypted data under the ignored `.dev/quote-demo-api-data` directory; `npm run demo:quotes:stop` stops managed processes without deleting the data.
+
 - Storefront: http://localhost:3000
 - Admin: http://localhost:3001
 - API health: http://localhost:4000/api/health

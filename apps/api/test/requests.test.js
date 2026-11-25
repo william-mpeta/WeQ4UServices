@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { quoteExpiryTimestamp, signQuoteActionToken } from '../src/quoteActionTokens.js';
+import { demoQuoteFixtures } from '../src/demoQuoteFixtures.js';
 import { createServer } from 'node:http';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import net from 'node:net';
@@ -240,9 +241,9 @@ test('service request lifecycle enforces consent and protects uploads and admin 
     method: 'PUT',
     headers: { ...adminHeaders, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      requirementsReviewed: true,
-      eligibility: 'eligible',
-      governmentReadiness: 'ready',
+      requirementsReviewed: false,
+      eligibility: 'pending',
+      governmentReadiness: 'pending',
       requirements: [
         { id: 'id-copy', label: 'Copy of ID', required: true, status: 'verified', evidenceDocumentId: uploadedDocument.id },
         { id: 'existing-licence', label: 'Current licence', required: true, status: 'verified', note: 'Verified against the customer-provided licence.' },
@@ -1227,4 +1228,80 @@ test('local development startup seeds the published price card and profile edits
   assert.equal(updatedProfile.version, 3);
   assert.equal(updatedProfile.versionHistory[0].version, 2);
   assert.equal(updatedProfile.versionHistory[0].components.governmentFee.costCents, null);
+});
+
+test('local quote-demo requests are seeded once and persist across API restarts', async (t) => {
+  const dataDirectory = await mkdtemp(path.join(tmpdir(), 'weq4u-quote-demo-test-'));
+  const children = [];
+  const token = 'test-only-quote-demo-persistence-token';
+  const startApi = async () => {
+    const port = await findPort();
+    const child = spawn(process.execPath, ['src/index.js'], {
+      cwd: apiDirectory,
+      env: {
+        ...process.env,
+        PORT: String(port),
+        NODE_ENV: 'test',
+        QUOTE_DEMO_SEED_ENABLED: 'true',
+        ADMIN_API_TOKEN: token,
+        DATA_ENCRYPTION_KEY: '3'.repeat(64),
+        PRIVATE_STORAGE_DIR: dataDirectory,
+        PRICING_SEED_ENABLED: 'false',
+        RESEND_API_KEY: '',
+        NOTIFICATION_FROM: '',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    children.push(child);
+    let output = '';
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { output += chunk.toString(); });
+    const baseUrl = `http://127.0.0.1:${port}/api`;
+    await waitForApi(baseUrl, child, () => output);
+    return { baseUrl, child };
+  };
+  t.after(async () => {
+    for (const child of children) {
+      if (child.exitCode === null) await stopChild(child);
+    }
+    await rm(dataDirectory, { recursive: true, force: true });
+  });
+
+  const assertSeededQuotes = async (baseUrl, heldReference = '') => {
+    const headers = { Authorization: `Bearer ${token}` };
+    const adminResponse = await fetch(`${baseUrl}/admin/requests`, { headers });
+    assert.equal(adminResponse.status, 200);
+    const { requests } = await adminResponse.json();
+    for (const fixture of demoQuoteFixtures) {
+      const request = requests.find((record) => record.ref === fixture.ref);
+      assert.ok(request, `${fixture.ref} should be visible in the staff queue`);
+      assert.equal(request.quote.quoteNumber, fixture.quoteNumber);
+      assert.equal(request.status, fixture.ref === heldReference ? 'On Hold' : 'Awaiting Customer Decision');
+      if (fixture.ref === heldReference) {
+        assert.equal(request.notes, 'Preserve this staff update across restarts.');
+        continue;
+      }
+
+      const trackingResponse = await fetch(`${baseUrl}/requests/${fixture.ref}`);
+      assert.equal(trackingResponse.status, 200);
+      const tracking = await trackingResponse.json();
+      assert.equal(tracking.status, 'Your quote is ready');
+      assert.equal(tracking.quoteBreakdown.quoteNumber, fixture.quoteNumber);
+      assert.equal(tracking.quoteBreakdown.totalCents, 50000);
+    }
+    assert.equal(requests.filter((record) => demoQuoteFixtures.some((fixture) => fixture.ref === record.ref)).length, 3);
+  };
+
+  const firstRun = await startApi();
+  await assertSeededQuotes(firstRun.baseUrl);
+  const holdResponse = await fetch(`${firstRun.baseUrl}/admin/requests/${demoQuoteFixtures[0].ref}`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'On Hold', notes: 'Preserve this staff update across restarts.' }),
+  });
+  assert.equal(holdResponse.status, 200);
+  await stopChild(firstRun.child);
+
+  const secondRun = await startApi();
+  await assertSeededQuotes(secondRun.baseUrl, demoQuoteFixtures[0].ref);
 });

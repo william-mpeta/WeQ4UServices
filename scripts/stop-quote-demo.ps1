@@ -10,11 +10,11 @@ function Get-ListeningProcessIds($port) {
 }
 
 if (-not (Test-Path -LiteralPath $statePath)) {
-  Write-Output 'No quote-demo UI process record was found; no processes were stopped.'
+  Write-Output 'No managed quote-demo process record was found; no processes were stopped.'
   exit 0
 }
 
-$entries = @(Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json)
+$entries = ConvertFrom-Json -InputObject (Get-Content -LiteralPath $statePath -Raw)
 foreach ($entry in $entries) {
   $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($entry.PID)" -ErrorAction SilentlyContinue
   $liveProcess = Get-Process -Id $entry.PID -ErrorAction SilentlyContinue
@@ -30,7 +30,7 @@ foreach ($entry in $entries) {
   $sameStart = $liveProcess.StartTime.ToUniversalTime().Ticks -eq $recordedStart.Ticks
 
   if (-not ($sameCommand -and $ownsPort -and $sameStart)) {
-    Write-Warning "$($entry.Name): PID $($entry.PID) no longer matches the recorded quote-demo UI; leaving it untouched."
+    Write-Warning "$($entry.Name): PID $($entry.PID) no longer matches the recorded quote-demo process; leaving it untouched."
     continue
   }
 
@@ -39,4 +39,4 @@ foreach ($entry in $entries) {
 }
 
 Remove-Item -LiteralPath $statePath -Force
-Write-Output 'The isolated API on port 4100 and regular API on port 4000 were not stopped.'
+Write-Output 'Stopped recorded quote-demo processes. Persistent encrypted demo records were preserved.'

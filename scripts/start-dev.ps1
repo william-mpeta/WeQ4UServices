@@ -58,13 +58,25 @@ try {
   foreach ($service in $services) {
     $stdoutPath = Join-Path $stateDirectory ($service.Name.ToLowerInvariant() + '.stdout.log')
     $stderrPath = Join-Path $stateDirectory ($service.Name.ToLowerInvariant() + '.stderr.log')
-    $serverProcess = Start-Process -FilePath $nodeExecutable `
-      -ArgumentList $service.Arguments `
-      -WorkingDirectory $service.Directory `
-      -WindowStyle Hidden `
-      -RedirectStandardOutput $stdoutPath `
-      -RedirectStandardError $stderrPath `
-      -PassThru
+    $previousDemoSeedFlag = $env:QUOTE_DEMO_SEED_ENABLED
+    try {
+      if ($service.Name -eq 'API') { $env:QUOTE_DEMO_SEED_ENABLED = 'true' }
+      $serverProcess = Start-Process -FilePath $nodeExecutable `
+        -ArgumentList $service.Arguments `
+        -WorkingDirectory $service.Directory `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath `
+        -PassThru
+    } finally {
+      if ($service.Name -eq 'API') {
+        if ($null -eq $previousDemoSeedFlag) {
+          Remove-Item Env:\QUOTE_DEMO_SEED_ENABLED -ErrorAction SilentlyContinue
+        } else {
+          $env:QUOTE_DEMO_SEED_ENABLED = $previousDemoSeedFlag
+        }
+      }
+    }
 
     $processStart = (Get-Process -Id $serverProcess.Id).StartTime.ToUniversalTime().ToString('o')
     $entries += [pscustomobject]@{

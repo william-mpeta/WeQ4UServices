@@ -11,9 +11,9 @@ test('workflow only offers reachable stages and shows stages with explicit prere
   const ready = {
     ...underReview,
     serviceAssessment: {
-      requirementsReviewed: true,
-      eligibility: 'eligible',
-      governmentReadiness: 'ready',
+      requirementsReviewed: false,
+      eligibility: 'pending',
+      governmentReadiness: 'pending',
       requirements: [{ label: 'Identity document', status: 'verified', note: 'Verified against the case record.' }],
     },
     documents: [{ reviewState: 'verified' }],
@@ -23,7 +23,6 @@ test('workflow only offers reachable stages and shows stages with explicit prere
   assert.ok(!availableNextStatuses({ ...ready, documents: [{ reviewState: 'received' }] }).includes('Quote Preparation'));
   assert.ok(!availableNextStatuses({ ...ready, documents: [{ reviewState: 'rejected' }] }).includes('Quote Preparation'));
   assert.ok(!availableNextStatuses({ ...ready, serviceAssessment: { ...ready.serviceAssessment, requirements: [] } }).includes('Quote Preparation'));
-  assert.ok(!availableNextStatuses({ ...ready, serviceAssessment: { ...ready.serviceAssessment, eligibility: 'pending' } }).includes('Quote Preparation'));
   assert.ok(!allowedNextStatuses({ status: 'Awaiting Documents', requestedDocuments: ['Copy of ID'] }).includes('Under Review'));
 });
 
